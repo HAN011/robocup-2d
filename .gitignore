@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.claude/
+logs/
+train/checkpoints/
+train/checkpoints_v17_backup/
+
+*.rcg
+*.rcl
+*.kwy
+
+*.pdf
