@@ -89,8 +89,8 @@ class RoboCupEnv(gym.Env):
         self._episode_steps = 0
         self._stuck_ball_counter = 0
         self._stuck_ball_last_pos: tuple[float, float] | None = None
-        self._stuck_ball_check_interval = 30
-        self._stuck_ball_max_count = 5
+        self._stuck_ball_check_interval = 15
+        self._stuck_ball_max_count = 3
         self._stuck_ball_min_move = 1.5
 
     def _episode_log_dir(self) -> Path:
