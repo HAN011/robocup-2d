@@ -26,7 +26,6 @@ from lib.debug.debug import log
 from lib.player.soccer_action import BodyAction, NeckAction
 from lib.rcsc.types import GameModeType
 from lib.rcsc.server_param import ServerParam
-from pyrusgeom.angle_deg import AngleDeg
 from pyrusgeom.vector_2d import Vector2D
 
 if TYPE_CHECKING:
@@ -43,6 +42,7 @@ _RL_POLICY = None
 _RL_POLICY_DEVICE = None
 _RL_REQUEST_ID = 0
 _RL_LAST_ACTION_SOURCE = "reset"
+_BHV_MOVE = None
 
 
 class Body_SmartKick(SmartKick):
@@ -104,43 +104,116 @@ class Body_Dribble(BodyAction):
         return Body_SmartKick(dribble_target, 0.9, 0.6, 2).execute(agent)
 
 
+class Body_BhvKick(BodyAction):
+    def execute(self, agent: "PlayerAgent"):
+        from base.bhv_kick import BhvKick
+
+        try:
+            return BhvKick().execute(agent)
+        except Exception as exc:
+            log.os_log().error(f"BhvKick crashed this cycle, fallback to safe kick: {exc}")
+
+        fallback = decide_on_ball_fallback_action(agent.world())
+        fallback.body.execute(agent)
+        if fallback.neck is not None:
+            agent.set_neck_action(fallback.neck)
+        return True
+
+
+class Body_BhvMove(BodyAction):
+    def execute(self, agent: "PlayerAgent"):
+        try:
+            if _get_bhv_move().execute(agent):
+                return True
+        except Exception as exc:
+            log.os_log().error(f"BhvMove crashed, fallback to formation move: {exc}")
+
+        wm = agent.world()
+        sp = ServerParam.i()
+        target = shifted_formation_position(wm)
+        return Body_GoToPoint(target, 1.0, sp.max_dash_power()).execute(agent)
+
+
+class Body_BhvSetPlay(BodyAction):
+    def execute(self, agent: "PlayerAgent"):
+        from base.set_play.bhv_set_play import Bhv_SetPlay
+
+        try:
+            if Bhv_SetPlay().execute(agent):
+                return True
+        except Exception as exc:
+            log.os_log().error(f"Bhv_SetPlay crashed, fallback to formation move: {exc}")
+
+        wm = agent.world()
+        sp = ServerParam.i()
+        target = shifted_formation_position(wm)
+        return Body_GoToPoint(target, 1.0, sp.max_dash_power()).execute(agent)
+
+
+class Body_GoalieDecision(BodyAction):
+    def execute(self, agent: "PlayerAgent"):
+        from base import goalie_decision
+
+        try:
+            return goalie_decision.decision(agent)
+        except Exception as exc:
+            log.os_log().error(f"goalie_decision crashed: {exc}")
+            return False
+
+
+class Body_Tackle(BodyAction):
+    def __init__(self, dir_deg: float):
+        super().__init__()
+        self._dir_deg = float(dir_deg)
+
+    def execute(self, agent: "PlayerAgent"):
+        return agent.do_tackle(self._dir_deg, foul=False)
+
+
 @dataclass
 class Action:
     body: BodyAction
-    neck: NeckAction
+    neck: NeckAction | None
     label: str
 
     def execute(self, agent: "PlayerAgent"):
         log.debug_client().add_message(self.label)
         self.body.execute(agent)
-        agent.set_neck_action(self.neck)
+        if self.neck is not None:
+            agent.set_neck_action(self.neck)
         return self
 
 
 def get_decision(agent: "PlayerAgent") -> Action:
     wm = agent.world()
+    StrategyFormation.i().update(wm)
 
     if RL_MODE and should_use_rl(wm):
         rl_action = get_rl_decision(wm)
         if rl_action is not None:
             return rl_action
 
-    return get_rule_based_decision(wm)
+    return get_rule_based_decision(agent)
 
 
 def should_use_rl(wm: "WorldModel") -> bool:
     return not wm.self().goalie() and wm.self().unum() == RL_CONTROL_UNUM
 
 
-def get_rule_based_decision(wm: "WorldModel") -> Action:
+def get_rule_based_decision(agent: "PlayerAgent") -> Action:
+    wm = agent.world()
+
     if wm.self().goalie():
         return decide_goalkeeper_action(wm)
 
-    if should_force_formation_only(wm):
-        return decide_off_ball_formation_only(wm)
+    if wm.game_mode().type() != GameModeType.PlayOn:
+        return Action(body=Body_BhvSetPlay(), neck=None, label="set_play")
+
+    if _should_tackle(wm):
+        return _tackle_action(wm)
 
     if wm.self().is_kickable():
-        return decide_on_ball_action(wm)
+        return decide_on_ball_action(agent)
 
     return decide_off_ball_action(wm)
 
@@ -245,39 +318,61 @@ def load_rl_policy():
     return _RL_POLICY, _RL_POLICY_DEVICE
 
 
+def _get_bhv_move():
+    global _BHV_MOVE
+    if _BHV_MOVE is None:
+        from base.bhv_move import BhvMove
+
+        _BHV_MOVE = BhvMove()
+    return _BHV_MOVE
+
+
 def action_from_rl_id(action_id: int, wm: "WorldModel") -> Action:
     from train.action import action_to_decision
 
     return action_to_decision(action_id, wm)
 
 
-def decide_on_ball_action(wm: "WorldModel") -> Action:
+def decide_on_ball_action(agent: "PlayerAgent") -> Action:
+    return Action(
+        body=Body_BhvKick(),
+        neck=None,
+        label="bhv_kick",
+    )
+
+
+def decide_on_ball_fallback_action(wm: "WorldModel") -> Action:
     if in_shooting_range(wm):
         return shoot_action(wm)
 
-    pass_target = find_best_pass_target(wm)
-    if pass_target is not None:
-        return pass_action(wm, pass_target)
+    teammate = find_best_pass_target(wm)
+    if teammate is not None:
+        return pass_action(wm, teammate)
 
     return dribble_action(wm)
 
 
 def decide_off_ball_action(wm: "WorldModel") -> Action:
     sp = ServerParam.i()
-
     self_min = wm.intercept_table().self_reach_cycle()
     mate_min = wm.intercept_table().teammate_reach_cycle()
+    opp_min = wm.intercept_table().opponent_reach_cycle()
 
-    if self_min <= 3 or self_min < mate_min - 2:
-        chase_target = wm.ball().inertia_point(max(1, min(self_min, 6)))
-        chase_target = clamp_to_field(chase_target)
+    if self_min <= 3 or self_min + 1 < opp_min or self_min < mate_min - 2:
+        return Action(body=Body_BhvMove(), neck=None, label="bhv_move_intercept")
+
+    if opp_min < mate_min and _should_press(wm):
+        press_target = _get_press_target(wm)
         return Action(
-            body=Body_GoToPoint(chase_target, 0.7, sp.max_dash_power()),
+            body=Body_GoToPoint(press_target, 0.5, sp.max_dash_power()),
             neck=Neck_TurnToBall(),
-            label="chase_ball",
+            label="press",
         )
 
-    return decide_off_ball_formation_only(wm)
+    if _is_defender(wm) and not _team_has_ball(wm):
+        return _decide_defensive_line_position(wm)
+
+    return Action(body=Body_BhvMove(), neck=None, label="bhv_move")
 
 
 def decide_off_ball_formation_only(wm: "WorldModel") -> Action:
@@ -290,11 +385,99 @@ def decide_off_ball_formation_only(wm: "WorldModel") -> Action:
     )
 
 
+def _should_tackle(wm: "WorldModel") -> bool:
+    tackle_prob = wm.self().tackle_probability()
+    opp_min = wm.intercept_table().opponent_reach_cycle()
+    self_min = wm.intercept_table().self_reach_cycle()
+    return tackle_prob > 0.85 and opp_min <= 2 and self_min > 3
+
+
+def _tackle_action(wm: "WorldModel") -> Action:
+    ball_dir = (wm.ball().pos() - wm.self().pos()).th()
+    tackle_dir = (ball_dir - wm.self().body()).degree()
+    return Action(
+        body=Body_Tackle(tackle_dir),
+        neck=Neck_TurnToBall(),
+        label="tackle",
+    )
+
+
+def _should_press(wm: "WorldModel") -> bool:
+    self_min = wm.intercept_table().self_reach_cycle()
+    mate_min = wm.intercept_table().teammate_reach_cycle()
+    ball_dist = wm.self().pos().dist(wm.ball().pos())
+    return self_min <= mate_min + 1 and ball_dist < 18.0
+
+
+def _get_press_target(wm: "WorldModel") -> Vector2D:
+    sp = ServerParam.i()
+    opp_min = wm.intercept_table().opponent_reach_cycle()
+    ball_future = wm.ball().inertia_point(max(1, min(opp_min, 5)))
+    our_goal = Vector2D(-sp.pitch_half_length(), 0.0)
+
+    lane = ball_future - our_goal
+    if lane.r() > 1.0e-6:
+        lane.set_length(min(4.0, max(2.5, lane.r() * 0.35)))
+        target = ball_future - lane
+    else:
+        target = Vector2D(ball_future.x() - 3.0, ball_future.y())
+
+    if ball_future.x() < -36.0:
+        target = Vector2D(min(target.x(), ball_future.x() - 1.5), target.y())
+
+    return clamp_to_field(target, margin_x=2.0, margin_y=2.0)
+
+
+def _is_defender(wm: "WorldModel") -> bool:
+    return wm.self().unum() in (2, 3, 4, 5)
+
+
+def _team_has_ball(wm: "WorldModel") -> bool:
+    return wm.self().is_kickable() or wm.exist_kickable_teammates()
+
+
+def _decide_defensive_line_position(wm: "WorldModel") -> Action:
+    sp = ServerParam.i()
+
+    base = shifted_formation_position(wm)
+    ball_x = wm.ball().pos().x()
+    max_x = ball_x - 5.0
+    if ball_x < -36.0:
+        max_x = min(max_x, -42.0)
+    target_x = min(base.x(), max_x)
+    target_x = max(target_x, -sp.pitch_half_length() + 6.0)
+
+    ball_y = wm.ball().pos().y()
+    target_y = base.y() * 0.75 + ball_y * 0.25 if ball_x < -25.0 else base.y()
+    target = Vector2D(target_x, target_y)
+    if ball_x < -20.0:
+        target._y *= 0.85
+    target = clamp_to_field(target, margin_x=3.0, margin_y=3.0)
+
+    return Action(
+        body=Body_GoToPoint(target, 1.0, sp.max_dash_power()),
+        neck=Neck_TurnToBall(),
+        label="defensive_line",
+    )
+
+
 def decide_goalkeeper_action(wm: "WorldModel") -> Action:
     sp = ServerParam.i()
+    goal_line_x = -sp.pitch_half_length() + 1.5
+
+    if wm.game_mode().type() != GameModeType.PlayOn:
+        return Action(body=Body_GoalieDecision(), neck=None, label="goalie_decision")
 
     if wm.self().is_kickable():
         return goalkeeper_clear_action(wm)
+
+    shot_line_target = _get_goalie_shot_line_target(wm)
+    if shot_line_target is not None:
+        return Action(
+            body=Body_GoToPoint(shot_line_target, 0.35, sp.max_dash_power()),
+            neck=Neck_TurnToBall(),
+            label="goalie_shot_line",
+        )
 
     if ball_in_our_penalty_area(wm):
         target = wm.ball().inertia_point(max(1, min(wm.intercept_table().self_reach_cycle(), 4)))
@@ -305,15 +488,50 @@ def decide_goalkeeper_action(wm: "WorldModel") -> Action:
             label="goalie_rush_intercept",
         )
 
+    track_cycle = 1
+    if wm.ball().pos().x() < -35.0:
+        track_cycle = 3
+    elif wm.ball().pos().x() < -20.0:
+        track_cycle = 2
+
+    track_point = wm.ball().inertia_point(track_cycle)
     goal_target = Vector2D(
-        -sp.pitch_half_length() + 1.5,
-        clamp(wm.ball().pos().y(), -sp.goal_half_width() + 0.5, sp.goal_half_width() - 0.5),
+        goal_line_x,
+        clamp(track_point.y(), -sp.goal_half_width() + 0.3, sp.goal_half_width() - 0.3),
     )
     return Action(
-        body=Body_GoToPoint(goal_target, 0.4, sp.max_dash_power()),
+        body=Body_GoToPoint(goal_target, 0.2, sp.max_dash_power()),
         neck=Neck_TurnToBall(),
         label="goalie_track_ball",
     )
+
+
+def _get_goalie_shot_line_target(wm: "WorldModel") -> Vector2D | None:
+    sp = ServerParam.i()
+    ball = wm.ball()
+
+    if ball.pos().x() > -30.0 or ball.vel().x() > -0.35:
+        return None
+
+    goal_line_x = -sp.pitch_half_length() + 1.2
+    for cycle in range(1, 9):
+        future = ball.inertia_point(cycle)
+        if future.x() > goal_line_x + 1.5:
+            continue
+        if abs(future.y()) > sp.goal_half_width() + 2.0:
+            return None
+        return Vector2D(
+            goal_line_x,
+            clamp(future.y(), -sp.goal_half_width() + 0.3, sp.goal_half_width() - 0.3),
+        )
+
+    if ball.pos().x() < -40.0 and abs(ball.pos().y()) <= sp.goal_half_width() + 4.0:
+        return Vector2D(
+            goal_line_x,
+            clamp(ball.pos().y() * 0.7, -sp.goal_half_width() + 0.3, sp.goal_half_width() - 0.3),
+        )
+
+    return None
 
 
 def goalkeeper_clear_action(wm: "WorldModel") -> Action:
@@ -437,10 +655,13 @@ def shifted_formation_position(wm: "WorldModel") -> Vector2D:
     ball = wm.ball().pos()
 
     x_shift = clamp(ball.x() * 0.35, -15.0, 15.0)
-    y_shift = clamp(ball.y() * 0.15, -6.0, 6.0)
+
+    # Shift more aggressively toward the sideline so players follow the ball
+    y_coeff = 0.30 if abs(ball.y()) > 25.0 else 0.15
+    y_shift = clamp(ball.y() * y_coeff, -12.0, 12.0)
 
     target = Vector2D(base.x() + x_shift, base.y() + y_shift)
-    return clamp_to_field(target, margin_x=3.0, margin_y=3.0)
+    return clamp_to_field(target, margin_x=3.0, margin_y=1.5)
 
 
 def should_force_formation_only(wm: "WorldModel") -> bool:
@@ -471,7 +692,23 @@ def should_force_formation_only(wm: "WorldModel") -> bool:
         GameModeType.GoalieCatchBall_Right,
     }
 
-    return game_mode_type in opponent_restart_modes and game_mode.side() != wm.our_side()
+    if game_mode_type not in opponent_restart_modes:
+        return False
+
+    is_opponent_restart = game_mode.side() != wm.our_side()
+
+    if not is_opponent_restart:
+        return False
+
+    # During opponent KickIn, allow the nearest player to approach the ball
+    # instead of standing passively in formation
+    if game_mode_type in (GameModeType.KickIn_Left, GameModeType.KickIn_Right):
+        self_min = wm.intercept_table().self_reach_cycle()
+        mate_min = wm.intercept_table().teammate_reach_cycle()
+        if self_min <= mate_min + 2:
+            return False
+
+    return True
 
 
 def ball_in_our_penalty_area(wm: "WorldModel") -> bool:
