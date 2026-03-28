@@ -5,6 +5,8 @@ __pycache__/
 
 .claude/
 logs/
+opponents/
+results/
 train/checkpoints/
 train/checkpoints_v17_backup/
 
