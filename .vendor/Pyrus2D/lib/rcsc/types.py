@@ -129,6 +129,7 @@ class LineID(Enum):
 class GameModeType(Enum):
     Null = "null"
     BeforeKickOff = "before_kick_off"
+    TimeExtended = "time_extended"
     TimeOver = "time_over"
     PlayOn = "play_on"
     KickOff_Left = "kick_off_l"
@@ -310,6 +311,7 @@ HETERO_DEFAULT = 0
 # ! playmode string table defined in rcssserver.
 GAMEMODETYPE_STRINGS = ["",  # TODO Value of PlayerMode enum be these strings....?
                         "before_kick_off",
+                        "time_extended",
                         "time_over",
                         "play_on",
                         "kick_off_l",

@@ -13,13 +13,14 @@ PORT="${PORT:-6000}"
 SERVER_DELAY="${SERVER_DELAY:-1}"
 VISUAL="${VISUAL:-0}"
 MONITOR_DELAY="${MONITOR_DELAY:-1}"
-HALF_TIME_CYCLES="${HALF_TIME_CYCLES:-3000}"
+HALF_TIME_CYCLES="${HALF_TIME_CYCLES:-}"
+HALF_TIME_SECONDS="${HALF_TIME_SECONDS:-${HALF_TIME_CYCLES:-300}}"
 NR_NORMAL_HALFS="${NR_NORMAL_HALFS:-2}"
 SIM_STEP_MS="${SIM_STEP_MS:-100}"
 MATCH_TIMEOUT="${MATCH_TIMEOUT:-}"
 
 if [[ -z "${MATCH_TIMEOUT}" ]]; then
-  expected_match_sec=$(( (HALF_TIME_CYCLES * NR_NORMAL_HALFS * SIM_STEP_MS + 999) / 1000 ))
+  expected_match_sec=$(( HALF_TIME_SECONDS * NR_NORMAL_HALFS ))
   timeout_buffer=300
   if [[ "${VISUAL}" == "1" ]]; then
     timeout_buffer=480
@@ -33,6 +34,7 @@ MATCH_LOG_ROOT="${PROJECT_ROOT}/logs/matches"
 MY_TEAM_NAME=""
 CURRENT_SERVER_PID=""
 CURRENT_HOME_LAUNCHER_PID=""
+CURRENT_OPPONENT_LAUNCHER_PID=""
 CURRENT_MONITOR_PID=""
 CURRENT_OPPONENT_DIR=""
 
@@ -46,6 +48,7 @@ opponent_name:
 
 Environment:
   VISUAL=1          enable live monitor (rcssmonitor)
+  HALF_TIME_SECONDS set match half duration in seconds (preferred)
   MATCH_TIMEOUT=NNN override match timeout in seconds
   RCSSMONITOR_BIN   custom rcssmonitor path
 EOF
@@ -71,6 +74,11 @@ cleanup_match_processes() {
     wait "${CURRENT_HOME_LAUNCHER_PID}" 2>/dev/null || true
   fi
 
+  if [[ -n "${CURRENT_OPPONENT_LAUNCHER_PID}" ]] && kill -0 "${CURRENT_OPPONENT_LAUNCHER_PID}" 2>/dev/null; then
+    kill "${CURRENT_OPPONENT_LAUNCHER_PID}" 2>/dev/null || true
+    wait "${CURRENT_OPPONENT_LAUNCHER_PID}" 2>/dev/null || true
+  fi
+
   if [[ -n "${CURRENT_SERVER_PID}" ]] && kill -0 "${CURRENT_SERVER_PID}" 2>/dev/null; then
     kill "${CURRENT_SERVER_PID}" 2>/dev/null || true
     wait "${CURRENT_SERVER_PID}" 2>/dev/null || true
@@ -87,6 +95,7 @@ cleanup_match_processes() {
   fi
 
   CURRENT_HOME_LAUNCHER_PID=""
+  CURRENT_OPPONENT_LAUNCHER_PID=""
   CURRENT_SERVER_PID=""
   CURRENT_MONITOR_PID=""
 }
@@ -110,12 +119,21 @@ PY
   printf '%s\n' "${team_name}"
 }
 
-wait_for_server_with_timeout() {
+wait_for_match_result() {
   local pid="$1"
   local timeout_sec="$2"
+  local server_log="$3"
   local elapsed=0
 
-  while kill -0 "${pid}" 2>/dev/null; do
+  while true; do
+    if parse_server_score "${server_log}" >/dev/null 2>&1; then
+      return 0
+    fi
+
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      break
+    fi
+
     if (( elapsed >= timeout_sec )); then
       return 124
     fi
@@ -123,7 +141,12 @@ wait_for_server_with_timeout() {
     elapsed=$((elapsed + 1))
   done
 
-  wait "${pid}"
+  if parse_server_score "${server_log}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  wait "${pid}" >/dev/null 2>&1 || true
+  return 1
 }
 
 parse_server_score() {
@@ -315,7 +338,7 @@ EOF
       "server::olcoach_port=$((PORT + 2))" \
       "server::auto_mode=true" \
       "server::synch_mode=0" \
-      "server::half_time=${HALF_TIME_CYCLES}" \
+      "server::half_time=${HALF_TIME_SECONDS}" \
       "server::nr_normal_halfs=${NR_NORMAL_HALFS}" \
       "server::connect_wait=20" \
       "server::kick_off_wait=20" \
@@ -345,12 +368,14 @@ EOF
     (
       cd "$(dirname "${opponent_start}")"
       ./start.sh -h "${HOST}" -p "${PORT}" -t "${opponent_team_name}"
-    ) >"${opponent_log}" 2>&1
+    ) >"${opponent_log}" 2>&1 &
+    CURRENT_OPPONENT_LAUNCHER_PID="$!"
 
-    if ! wait_for_server_with_timeout "${CURRENT_SERVER_PID}" "${MATCH_TIMEOUT}"; then
+    if ! wait_for_match_result "${CURRENT_SERVER_PID}" "${MATCH_TIMEOUT}" "${server_log}"; then
       echo "Match ${i}: ERROR timeout or server crash" | tee -a "${result_file}" >&2
       exit 1
     fi
+    cleanup_match_processes
     CURRENT_SERVER_PID=""
 
     local score_fields

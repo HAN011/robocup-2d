@@ -161,13 +161,32 @@ class Body_GoalieDecision(BodyAction):
             return False
 
 
-class Body_Tackle(BodyAction):
-    def __init__(self, dir_deg: float):
-        super().__init__()
-        self._dir_deg = float(dir_deg)
-
+class Body_BhvBlock(BodyAction):
     def execute(self, agent: "PlayerAgent"):
-        return agent.do_tackle(self._dir_deg, foul=False)
+        from base.bhv_block import Bhv_Block
+
+        try:
+            if Bhv_Block().execute(agent):
+                return True
+        except Exception as exc:
+            log.os_log().error(f"Bhv_Block crashed, fallback to BhvMove: {exc}")
+
+        return Body_BhvMove().execute(agent)
+
+
+class Body_BasicTackle(BodyAction):
+    def execute(self, agent: "PlayerAgent"):
+        from base.basic_tackle import BasicTackle
+
+        try:
+            if BasicTackle(0.8, 80).execute(agent):
+                return True
+        except Exception as exc:
+            log.os_log().error(f"BasicTackle crashed, fallback to BhvMove/BhvKick: {exc}")
+
+        if agent.world().self().is_kickable():
+            return Body_BhvKick().execute(agent)
+        return Body_BhvMove().execute(agent)
 
 
 @dataclass
@@ -204,13 +223,13 @@ def get_rule_based_decision(agent: "PlayerAgent") -> Action:
     wm = agent.world()
 
     if wm.self().goalie():
-        return decide_goalkeeper_action(wm)
+        return Action(body=Body_GoalieDecision(), neck=None, label="goalie_decision")
 
     if wm.game_mode().type() != GameModeType.PlayOn:
         return Action(body=Body_BhvSetPlay(), neck=None, label="set_play")
 
     if _should_tackle(wm):
-        return _tackle_action(wm)
+        return Action(body=Body_BasicTackle(), neck=None, label="basic_tackle")
 
     if wm.self().is_kickable():
         return decide_on_ball_action(agent)
@@ -357,20 +376,20 @@ def decide_off_ball_action(wm: "WorldModel") -> Action:
     self_min = wm.intercept_table().self_reach_cycle()
     mate_min = wm.intercept_table().teammate_reach_cycle()
     opp_min = wm.intercept_table().opponent_reach_cycle()
+    ball_near_sideline = abs(wm.ball().pos().y()) > sp.pitch_half_width() - 8.0
 
-    if self_min <= 3 or self_min + 1 < opp_min or self_min < mate_min - 2:
+    if (
+        not wm.exist_kickable_teammates()
+        and (
+            self_min <= 3
+            or (self_min <= mate_min and self_min < opp_min + 3)
+            or (ball_near_sideline and self_min <= mate_min + 1)
+        )
+    ):
         return Action(body=Body_BhvMove(), neck=None, label="bhv_move_intercept")
 
-    if opp_min < mate_min and _should_press(wm):
-        press_target = _get_press_target(wm)
-        return Action(
-            body=Body_GoToPoint(press_target, 0.5, sp.max_dash_power()),
-            neck=Neck_TurnToBall(),
-            label="press",
-        )
-
-    if _is_defender(wm) and not _team_has_ball(wm):
-        return _decide_defensive_line_position(wm)
+    if opp_min < mate_min:
+        return Action(body=Body_BhvBlock(), neck=None, label="bhv_block")
 
     return Action(body=Body_BhvMove(), neck=None, label="bhv_move")
 
@@ -386,173 +405,48 @@ def decide_off_ball_formation_only(wm: "WorldModel") -> Action:
 
 
 def _should_tackle(wm: "WorldModel") -> bool:
+    from pyrusgeom.line_2d import Line2D
+    from pyrusgeom.ray_2d import Ray2D
+    from lib.rcsc.types import Card
+
+    sp = ServerParam.i()
     tackle_prob = wm.self().tackle_probability()
-    opp_min = wm.intercept_table().opponent_reach_cycle()
-    self_min = wm.intercept_table().self_reach_cycle()
-    return tackle_prob > 0.85 and opp_min <= 2 and self_min > 3
 
+    if (
+        wm.self().card() == Card.NO_CARD
+        and (
+            wm.ball().pos().x() > sp.our_penalty_area_line_x() + 0.5
+            or wm.ball().pos().abs_y() > sp.penalty_area_half_width() + 0.5
+        )
+        and tackle_prob < wm.self().foul_probability()
+    ):
+        tackle_prob = wm.self().foul_probability()
 
-def _tackle_action(wm: "WorldModel") -> Action:
-    ball_dir = (wm.ball().pos() - wm.self().pos()).th()
-    tackle_dir = (ball_dir - wm.self().body()).degree()
-    return Action(
-        body=Body_Tackle(tackle_dir),
-        neck=Neck_TurnToBall(),
-        label="tackle",
-    )
+    if tackle_prob < 0.8:
+        return False
 
-
-def _should_press(wm: "WorldModel") -> bool:
     self_min = wm.intercept_table().self_reach_cycle()
     mate_min = wm.intercept_table().teammate_reach_cycle()
-    ball_dist = wm.self().pos().dist(wm.ball().pos())
-    return self_min <= mate_min + 1 and ball_dist < 18.0
-
-
-def _get_press_target(wm: "WorldModel") -> Vector2D:
-    sp = ServerParam.i()
     opp_min = wm.intercept_table().opponent_reach_cycle()
-    ball_future = wm.ball().inertia_point(max(1, min(opp_min, 5)))
-    our_goal = Vector2D(-sp.pitch_half_length(), 0.0)
+    self_reach_point = wm.ball().inertia_point(self_min)
 
-    lane = ball_future - our_goal
-    if lane.r() > 1.0e-6:
-        lane.set_length(min(4.0, max(2.5, lane.r() * 0.35)))
-        target = ball_future - lane
-    else:
-        target = Vector2D(ball_future.x() - 3.0, ball_future.y())
+    self_goal = False
+    if self_reach_point.x() < -sp.pitch_half_length():
+        ball_ray = Ray2D(wm.ball().pos(), wm.ball().vel().th())
+        goal_line = Line2D(Vector2D(-sp.pitch_half_length(), 10.0), Vector2D(-sp.pitch_half_length(), -10.0))
+        intersect = ball_ray.intersection(goal_line)
+        if intersect and intersect.is_valid() and intersect.abs_y() < sp.goal_half_width() + 1.0:
+            self_goal = True
 
-    if ball_future.x() < -36.0:
-        target = Vector2D(min(target.x(), ball_future.x() - 1.5), target.y())
-
-    return clamp_to_field(target, margin_x=2.0, margin_y=2.0)
-
-
-def _is_defender(wm: "WorldModel") -> bool:
-    return wm.self().unum() in (2, 3, 4, 5)
-
-
-def _team_has_ball(wm: "WorldModel") -> bool:
-    return wm.self().is_kickable() or wm.exist_kickable_teammates()
-
-
-def _decide_defensive_line_position(wm: "WorldModel") -> Action:
-    sp = ServerParam.i()
-
-    base = shifted_formation_position(wm)
-    ball_x = wm.ball().pos().x()
-    max_x = ball_x - 5.0
-    if ball_x < -36.0:
-        max_x = min(max_x, -42.0)
-    target_x = min(base.x(), max_x)
-    target_x = max(target_x, -sp.pitch_half_length() + 6.0)
-
-    ball_y = wm.ball().pos().y()
-    target_y = base.y() * 0.75 + ball_y * 0.25 if ball_x < -25.0 else base.y()
-    target = Vector2D(target_x, target_y)
-    if ball_x < -20.0:
-        target._y *= 0.85
-    target = clamp_to_field(target, margin_x=3.0, margin_y=3.0)
-
-    return Action(
-        body=Body_GoToPoint(target, 1.0, sp.max_dash_power()),
-        neck=Neck_TurnToBall(),
-        label="defensive_line",
-    )
-
-
-def decide_goalkeeper_action(wm: "WorldModel") -> Action:
-    sp = ServerParam.i()
-    goal_line_x = -sp.pitch_half_length() + 1.5
-
-    if wm.game_mode().type() != GameModeType.PlayOn:
-        return Action(body=Body_GoalieDecision(), neck=None, label="goalie_decision")
-
-    if wm.self().is_kickable():
-        return goalkeeper_clear_action(wm)
-
-    shot_line_target = _get_goalie_shot_line_target(wm)
-    if shot_line_target is not None:
-        return Action(
-            body=Body_GoToPoint(shot_line_target, 0.35, sp.max_dash_power()),
-            neck=Neck_TurnToBall(),
-            label="goalie_shot_line",
+    return bool(
+        wm.kickable_opponent()
+        or self_goal
+        or (opp_min < self_min - 3 and opp_min < mate_min - 3)
+        or (
+            self_min >= 5
+            and wm.ball().pos().dist2(sp.their_team_goal_pos()) < 10**2
+            and ((sp.their_team_goal_pos() - wm.self().pos()).th() - wm.self().body()).abs() < 45.0
         )
-
-    if ball_in_our_penalty_area(wm):
-        target = wm.ball().inertia_point(max(1, min(wm.intercept_table().self_reach_cycle(), 4)))
-        target = clamp_to_field(target)
-        return Action(
-            body=Body_GoToPoint(target, 0.5, sp.max_dash_power()),
-            neck=Neck_TurnToBall(),
-            label="goalie_rush_intercept",
-        )
-
-    track_cycle = 1
-    if wm.ball().pos().x() < -35.0:
-        track_cycle = 3
-    elif wm.ball().pos().x() < -20.0:
-        track_cycle = 2
-
-    track_point = wm.ball().inertia_point(track_cycle)
-    goal_target = Vector2D(
-        goal_line_x,
-        clamp(track_point.y(), -sp.goal_half_width() + 0.3, sp.goal_half_width() - 0.3),
-    )
-    return Action(
-        body=Body_GoToPoint(goal_target, 0.2, sp.max_dash_power()),
-        neck=Neck_TurnToBall(),
-        label="goalie_track_ball",
-    )
-
-
-def _get_goalie_shot_line_target(wm: "WorldModel") -> Vector2D | None:
-    sp = ServerParam.i()
-    ball = wm.ball()
-
-    if ball.pos().x() > -30.0 or ball.vel().x() > -0.35:
-        return None
-
-    goal_line_x = -sp.pitch_half_length() + 1.2
-    for cycle in range(1, 9):
-        future = ball.inertia_point(cycle)
-        if future.x() > goal_line_x + 1.5:
-            continue
-        if abs(future.y()) > sp.goal_half_width() + 2.0:
-            return None
-        return Vector2D(
-            goal_line_x,
-            clamp(future.y(), -sp.goal_half_width() + 0.3, sp.goal_half_width() - 0.3),
-        )
-
-    if ball.pos().x() < -40.0 and abs(ball.pos().y()) <= sp.goal_half_width() + 4.0:
-        return Vector2D(
-            goal_line_x,
-            clamp(ball.pos().y() * 0.7, -sp.goal_half_width() + 0.3, sp.goal_half_width() - 0.3),
-        )
-
-    return None
-
-
-def goalkeeper_clear_action(wm: "WorldModel") -> Action:
-    sp = ServerParam.i()
-    target_teammate = None
-
-    for teammate in wm.teammates():
-        if teammate is None:
-            continue
-        if teammate.is_ghost() or teammate.pos_count() > 8:
-            continue
-        if target_teammate is None or teammate.pos().x() > target_teammate.pos().x():
-            target_teammate = teammate
-
-    target_point = target_teammate.pos() if target_teammate is not None else Vector2D(25.0, 0.0)
-    first_speed = 2.5 if target_teammate is not None else sp.ball_speed_max()
-
-    return Action(
-        body=Body_SmartKick(target_point, first_speed, 1.5, 3),
-        neck=Neck_TurnToBall(),
-        label="goalie_clear",
     )
 
 
@@ -709,16 +603,6 @@ def should_force_formation_only(wm: "WorldModel") -> bool:
             return False
 
     return True
-
-
-def ball_in_our_penalty_area(wm: "WorldModel") -> bool:
-    sp = ServerParam.i()
-    ball = wm.ball().pos()
-    return (
-        ball.x() <= -sp.pitch_half_length() + sp.penalty_area_length()
-        and ball.x() >= -sp.pitch_half_length()
-        and abs(ball.y()) <= sp.penalty_area_half_width()
-    )
 
 
 def clamp_to_field(point: Vector2D, margin_x: float = 1.0, margin_y: float = 1.0) -> Vector2D:

@@ -125,6 +125,7 @@ class GameMode:
     def is_server_cycle_stopped_mode(self):
         return self._game_mode in [
             GameModeType.BeforeKickOff,
+            GameModeType.TimeExtended,
             GameModeType.AfterGoal_Left,
             GameModeType.AfterGoal_Right,
             GameModeType.OffSide_Left,
