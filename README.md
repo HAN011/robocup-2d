@@ -2,7 +2,25 @@
 
 ## 1. 项目概览
 
-本仓库是我们用于 2026 RoboCup 中国赛的 2D 仿真足球队伍代码。
+你现在拿到的是我们用于 2026 RoboCup 中国赛的 2D 仿真足球队伍代码压缩包。
+
+你不会直接拿到 GitHub 仓库权限。
+
+你拿到的是：
+
+- 一个项目 `zip` 包
+- 运行和分析比赛需要的代码、脚本和日志目录
+- 这份写给你的接手说明
+
+这份交付默认不要求你使用 GitHub 工作流。
+
+你不需要先学会 `branch`、`PR`、`rebase` 这类流程再开始工作。
+
+如果你需要回传你的工作结果，直接把下面这些内容发回主开发即可：
+
+- 你改过的文件
+- 新增的 `logs/` 或 `results/`
+- 一份简短结论，写清楚你执行了什么命令、看到了什么结果、遇到了什么问题
 
 当前整体结构：
 
@@ -46,12 +64,32 @@ Ubuntu 装好之后，后续所有命令都在 Ubuntu 终端里执行。
 
 ## 3. 一次性环境安装
 
-### 3.1 克隆仓库
+### 3.1 解压项目压缩包
 
 ```bash
-git clone <your-repo-url> robocup
+cd ~
+unzip ~/Downloads/robocup.zip
+mv robocup-* robocup
 cd robocup
 ```
+
+如果你拿到的压缩包名字不是 `robocup.zip`，把命令里的文件名替换成你实际收到的文件名。
+
+如果解压后的目录名字不是 `robocup-*`，把 `mv` 那一行改成实际目录名。
+
+以后如果你收到新版本压缩包，建议这样做：
+
+1. 先备份你本地有价值的 `logs/`、`results/` 或自己的分析文件。
+2. 不要直接覆盖旧目录。
+3. 先把新版本解压成一个新目录，再决定是否迁移日志或分析结果。
+
+如果你改过文件，不要只回传整个旧目录。
+
+更推荐的做法是：
+
+1. 保留你自己的工作目录。
+2. 单独整理你改过的文件和新增日志。
+3. 把这些文件重新打一个小 `zip` 发回主开发。
 
 ### 3.2 在 Ubuntu 里安装 Miniconda
 
@@ -104,6 +142,83 @@ bash scripts/setup_opponents.sh
 - `Cyrus2D_base`
 - `HELIOS_base`
 - 本地 `librcsc` 编译结果，位于 `opponents/local_cyrus` 和 `opponents/local_helios`
+
+### 3.5 在 VS Code 中使用 Codex（队友第一次使用必读）
+
+适用对象：
+
+- Windows + `WSL2 + Ubuntu 24.04`
+- 需要在 VS Code 里阅读、提问、辅助修改代码的队友
+
+官方现状说明：
+
+- OpenAI 官方说明 Codex IDE extension 支持 VS Code
+- Windows 支持目前仍是 `experimental`
+- 对 Windows 用户，官方建议优先在 `WSL workspace` 中使用
+
+建议按下面顺序操作：
+
+1. 在 Windows 里安装 `VS Code`
+2. 安装 `WSL` 扩展，确保可以从 VS Code 连接到 Ubuntu
+3. 在 Ubuntu 终端进入你解压后的项目目录：
+
+```bash
+cd ~/robocup
+code .
+```
+
+4. 确认 VS Code 左下角显示的是 `WSL: Ubuntu-24.04` 之类的远程工作区
+5. 打开扩展市场，搜索 `Codex`
+6. 安装 OpenAI 的 `Codex IDE extension`
+7. 安装后，在 VS Code 侧边栏找到 `Codex`
+8. 按提示使用自己的 `ChatGPT` 账号登录
+
+第一次登录后，建议先只做这几件事：
+
+- 让 Codex 解释当前项目结构
+- 让 Codex 帮你定位某个文件
+- 让 Codex 总结某场比赛相关日志
+- 不要一上来就让 Codex 大改核心策略
+
+推荐的第一次提问：
+
+```text
+请先阅读这个 RoboCup 2D 项目，告诉我：
+1. 比赛主逻辑在哪
+2. 训练代码在哪
+3. 跑比赛的入口脚本是哪几个
+4. results 和 logs 目录分别是干什么的
+```
+
+第二个推荐提问：
+
+```text
+请阅读 player/decision.py，告诉我当前决策逻辑的主流程，不要修改代码。
+```
+
+第三个推荐提问：
+
+```text
+请帮我找到最近一场 helios 对局的日志位置，并告诉我应该先看哪个文件。
+```
+
+对队友的使用边界要求：
+
+- 先把 Codex 当作“代码阅读和辅助定位工具”
+- 改 `README`、分析脚本、辅助脚本前，可以先让 Codex 帮忙
+- 改 `player/decision.py`、`base/`、训练主逻辑前，先和主开发确认
+- 任何让 Codex 改代码的操作，都要先看 diff 再接受
+
+如果 VS Code 里看不到 Codex：
+
+- 先重启 VS Code
+- 确认当前窗口是在 `WSL` 工作区，不是在 Windows 本地目录
+- 再确认扩展是否安装在当前 `WSL` 环境，而不是只装在 Windows 本地侧
+
+官方参考：
+
+- https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan
+- https://developers.openai.com/codex/ide
 
 ## 4. 安装后快速验证
 
@@ -269,6 +384,8 @@ logs/train/
 
 ## 8. 当前项目状态
 
+你接手时的当前项目状态如下。
+
 状态统计日期：
 
 - `2026-03-29`
@@ -293,31 +410,37 @@ logs/train/
 - 如果本机已有其他实例占用 `6000/6001/6002`，比赛脚本会启动失败，需要改 `PORT`
 - 缩短版集成验证在当前代码库里不保证稳定产出结果文件，必要时应查看 `logs/matches/.../rcssserver.log` 中是否已有 `Game Results`
 
-## 10. 建议队内分工
+## 10. 如果你负责不同工作，你应该做什么
 
 ### 主开发 / 最终合版负责人
 
-- 修改 `player/decision.py`
-- 修改 `base/`
-- 决定 RL 改动是否并入比赛版本
-- 负责最终比赛版本
+如果你负责主开发或最终合版：
+
+- 你可以修改 `player/decision.py`
+- 你可以修改 `base/`
+- 你来决定 RL 改动是否并入比赛版本
+- 你负责最终比赛版本
 
 ### 测试与评测负责人
 
-- 执行 `./scripts/run_match.sh helios 3`
-- 执行 `./scripts/run_match.sh cyrus2d 3`
-- 记录比分、异常、回归结果
-- 总结失球模式
+如果你负责测试与评测：
+
+- 你要执行 `./scripts/run_match.sh helios 3`
+- 你要执行 `./scripts/run_match.sh cyrus2d 3`
+- 你要记录比分、异常、回归结果
+- 你要总结失球模式
 
 ### 交付与环境负责人
 
-- 在干净的 `WSL2 + Ubuntu 24.04` 环境里复现安装
-- 记录所有环境问题
-- 维护这份交付文档
+如果你负责交付与环境：
+
+- 你要在干净的 `WSL2 + Ubuntu 24.04` 环境里复现安装
+- 你要记录所有环境问题
+- 你要维护这份交付文档
 
 ## 11. 最低交付检查清单
 
-在说“可以交付”之前，至少确认下面这些都通过：
+如果你要反馈“这版可以接手”或“这版可以跑”，至少确认下面这些都通过：
 
 - Ubuntu 环境确认为 `WSL2 + Ubuntu 24.04`
 - `conda activate robocup2d` 可用
@@ -328,9 +451,9 @@ logs/train/
 - `./scripts/run_match.sh cyrus2d 1` 能产出结果文件
 - 接手人能正常查看 `results/` 和 `logs/matches/`
 
-## 12. 接手后的第一批动作
+## 12. 你接手后的第一批动作
 
-接手仓库后，先做下面几件事：
+你接手项目后，先做下面几件事：
 
 1. 完成环境安装和冒烟测试。
 2. 重新跑 `HELIOS` 3 场。
