@@ -20,6 +20,9 @@ bootstrap_pyrus2d(PROJECT_ROOT)
 
 from base.strategy_formation import StrategyFormation
 from lib.action.go_to_point import GoToPoint
+from lib.action.intercept import Intercept
+from lib.action.neck_turn_to_ball_or_scan import NeckTurnToBallOrScan
+from lib.action.scan_field import ScanField
 from lib.action.neck_turn_to_ball import NeckTurnToBall
 from lib.action.smart_kick import SmartKick
 from lib.debug.debug import log
@@ -109,7 +112,8 @@ class Body_BhvKick(BodyAction):
         from base.bhv_kick import BhvKick
 
         try:
-            return BhvKick().execute(agent)
+            if BhvKick().execute(agent):
+                return True
         except Exception as exc:
             log.os_log().error(f"BhvKick crashed this cycle, fallback to safe kick: {exc}")
 
@@ -122,16 +126,31 @@ class Body_BhvKick(BodyAction):
 
 class Body_BhvMove(BodyAction):
     def execute(self, agent: "PlayerAgent"):
-        try:
-            if _get_bhv_move().execute(agent):
-                return True
-        except Exception as exc:
-            log.os_log().error(f"BhvMove crashed, fallback to formation move: {exc}")
-
         wm = agent.world()
         sp = ServerParam.i()
-        target = shifted_formation_position(wm)
-        return Body_GoToPoint(target, 1.0, sp.max_dash_power()).execute(agent)
+        label = getattr(agent, "_aurora_last_action_label", "")
+
+        if label == "bhv_move_intercept":
+            if Intercept().execute(agent):
+                agent.set_neck_action(Neck_TurnToBall())
+                return True
+            return self._move_to_target(agent, shifted_formation_position(wm), 1.0, sp.max_dash_power())
+
+        target = getattr(agent, "_aurora_last_decision_target", None)
+        if target is None:
+            target = shifted_formation_position(wm)
+
+        dist_thr = max(wm.ball().dist_from_self() * 0.1, 1.0)
+        return self._move_to_target(agent, target, dist_thr, sp.max_dash_power())
+
+    @staticmethod
+    def _move_to_target(agent: "PlayerAgent", target: Vector2D, dist_thr: float, dash_power: float) -> bool:
+        if Body_GoToPoint(target, dist_thr, dash_power).execute(agent):
+            agent.set_neck_action(NeckTurnToBallOrScan())
+            return True
+
+        ScanField().execute(agent)
+        return True
 
 
 class Body_BhvSetPlay(BodyAction):
@@ -163,14 +182,10 @@ class Body_GoalieDecision(BodyAction):
 
 class Body_BhvBlock(BodyAction):
     def execute(self, agent: "PlayerAgent"):
-        from base.bhv_block import Bhv_Block
-
-        try:
-            if Bhv_Block().execute(agent):
-                return True
-        except Exception as exc:
-            log.os_log().error(f"Bhv_Block crashed, fallback to BhvMove: {exc}")
-
+        target = getattr(agent, "_aurora_last_block_target", None)
+        if target is not None and Body_GoToPoint(target, 0.1, 100.0).execute(agent):
+            agent.set_neck_action(Neck_TurnToBall())
+            return True
         return Body_BhvMove().execute(agent)
 
 
@@ -194,9 +209,14 @@ class Action:
     body: BodyAction
     neck: NeckAction | None
     label: str
+    decision_target: Vector2D | None = None
+    block_target: Vector2D | None = None
 
     def execute(self, agent: "PlayerAgent"):
         log.debug_client().add_message(self.label)
+        setattr(agent, "_aurora_last_action_label", self.label)
+        setattr(agent, "_aurora_last_decision_target", self.decision_target.copy() if self.decision_target is not None else None)
+        setattr(agent, "_aurora_last_block_target", self.block_target.copy() if self.block_target is not None else None)
         self.body.execute(agent)
         if self.neck is not None:
             agent.set_neck_action(self.neck)
@@ -377,21 +397,45 @@ def decide_off_ball_action(wm: "WorldModel") -> Action:
     mate_min = wm.intercept_table().teammate_reach_cycle()
     opp_min = wm.intercept_table().opponent_reach_cycle()
     ball_near_sideline = abs(wm.ball().pos().y()) > sp.pitch_half_width() - 8.0
+    urgent_defense = (
+        wm.ball().pos().x() < -12.0
+        and self_min <= mate_min + 1
+        and self_min <= opp_min + 2
+    )
 
     if (
         not wm.exist_kickable_teammates()
         and (
+            urgent_defense
+            or
             self_min <= 3
             or (self_min <= mate_min and self_min < opp_min + 3)
             or (ball_near_sideline and self_min <= mate_min + 1)
         )
     ):
-        return Action(body=Body_BhvMove(), neck=None, label="bhv_move_intercept")
+        return Action(
+            body=Body_BhvMove(),
+            neck=None,
+            label="bhv_move_intercept",
+            decision_target=wm.ball().inertia_point(self_min),
+        )
 
     if opp_min < mate_min:
-        return Action(body=Body_BhvBlock(), neck=None, label="bhv_block")
+        block_target = find_block_target(wm)
+        return Action(
+            body=Body_BhvBlock(),
+            neck=None,
+            label="bhv_block",
+            decision_target=block_target.copy() if block_target is not None else None,
+            block_target=block_target,
+        )
 
-    return Action(body=Body_BhvMove(), neck=None, label="bhv_move")
+    return Action(
+        body=Body_BhvMove(),
+        neck=None,
+        label="bhv_move",
+        decision_target=StrategyFormation.i().get_pos(wm.self().unum()).copy(),
+    )
 
 
 def decide_off_ball_formation_only(wm: "WorldModel") -> Action:
@@ -401,6 +445,7 @@ def decide_off_ball_formation_only(wm: "WorldModel") -> Action:
         body=Body_GoToPoint(target, 1.0, sp.max_dash_power()),
         neck=Neck_TurnToBall(),
         label="move_to_formation",
+        decision_target=target,
     )
 
 
@@ -457,6 +502,7 @@ def shoot_action(wm: "WorldModel") -> Action:
         body=Body_SmartKick(target, sp.ball_speed_max(), sp.ball_speed_max() - 0.4, 3),
         neck=Neck_TurnToBall(),
         label="shoot",
+        decision_target=target,
     )
 
 
@@ -466,16 +512,17 @@ def pass_action(wm: "WorldModel", teammate: "PlayerObject") -> Action:
         body=Body_KickOneStep(teammate.pos(), start_speed),
         neck=Neck_TurnToBall(),
         label=f"pass_{teammate.unum()}",
+        decision_target=teammate.pos().copy(),
     )
 
 
 def dribble_action(wm: "WorldModel") -> Action:
-    sp = ServerParam.i()
-    goal_target = Vector2D(sp.pitch_half_length(), 0.0)
+    goal_target = choose_dribble_target(wm)
     return Action(
         body=Body_Dribble(goal_target),
         neck=Neck_TurnToBall(),
         label="dribble",
+        decision_target=goal_target,
     )
 
 
@@ -490,7 +537,13 @@ def in_shooting_range(wm: "WorldModel") -> bool:
 
 def find_best_pass_target(wm: "WorldModel"):
     me = wm.self()
-    candidates = []
+    candidates: list[tuple[float, "PlayerObject"]] = []
+    under_pressure = (
+        wm.exist_kickable_opponents()
+        or wm.intercept_table().opponent_reach_cycle() <= 2
+        or nearest_valid_opponent_distance(wm, me.pos()) < 6.0
+    )
+    allow_reset_pass = under_pressure or me.pos().x() < -5.0
 
     for teammate in wm.teammates():
         if teammate is None:
@@ -499,33 +552,48 @@ def find_best_pass_target(wm: "WorldModel"):
             continue
         if teammate.goalie():
             continue
-        if distance_to_their_goal(teammate.pos()) >= distance_to_their_goal(me.pos()) - 1.0:
+        if teammate.pos().x() < me.pos().x() - 10.0 and not allow_reset_pass:
             continue
-        if not pass_lane_clear(wm, teammate):
+        if me.pos().x() < -25.0 and teammate.pos().x() < me.pos().x() - 4.0:
+            continue
+        lane_margin = pass_lane_margin(wm, me.pos(), teammate.pos())
+        if not pass_lane_clear(wm, teammate, lane_margin=lane_margin):
             continue
         if not receiver_goal_lane_clear(wm, teammate):
             continue
+        receiver_space = nearest_valid_opponent_distance(wm, teammate.pos())
+        if receiver_space < 3.0:
+            continue
 
-        candidates.append(teammate)
+        progress = teammate.pos().x() - me.pos().x()
+        score = (
+            progress * 2.2
+            + lane_margin * 1.5
+            + receiver_space
+            - abs(teammate.pos().y()) * 0.08
+        )
+        if teammate.pos().x() > me.pos().x():
+            score += 3.0
+        if allow_reset_pass and teammate.pos().x() < me.pos().x():
+            score += min(receiver_space, 4.0)
+
+        candidates.append((score, teammate))
 
     if not candidates:
         return None
 
-    return max(candidates, key=lambda player: (player.pos().x(), -abs(player.pos().y())))
+    return max(candidates, key=lambda item: item[0])[1]
 
-
-def pass_lane_clear(wm: "WorldModel", teammate: "PlayerObject") -> bool:
+def pass_lane_clear(wm: "WorldModel", teammate: "PlayerObject", lane_margin: float | None = None) -> bool:
     start = wm.self().pos()
     end = teammate.pos()
-
-    for opponent in wm.opponents():
-        if opponent is None or opponent.unum() <= 0 or opponent.pos_count() > 8 or opponent.is_ghost():
-            continue
-
-        if point_to_segment_distance(opponent.pos(), start, end) < 3.0:
-            return False
-
-    return True
+    margin = pass_lane_margin(wm, start, end) if lane_margin is None else lane_margin
+    threshold = 3.0
+    if start.x() < -15.0:
+        threshold = 3.5
+    if end.x() < start.x():
+        threshold += 0.5
+    return margin >= threshold
 
 
 def receiver_goal_lane_clear(wm: "WorldModel", teammate: "PlayerObject") -> bool:
@@ -543,10 +611,77 @@ def receiver_goal_lane_clear(wm: "WorldModel", teammate: "PlayerObject") -> bool
     return True
 
 
+def pass_lane_margin(wm: "WorldModel", start: Vector2D, end: Vector2D) -> float:
+    min_margin = float("inf")
+
+    for opponent in wm.opponents():
+        if opponent is None or opponent.unum() <= 0 or opponent.pos_count() > 8 or opponent.is_ghost():
+            continue
+        min_margin = min(min_margin, point_to_segment_distance(opponent.pos(), start, end))
+
+    return min_margin if min_margin != float("inf") else 99.0
+
+
+def nearest_valid_opponent_distance(wm: "WorldModel", point: Vector2D) -> float:
+    min_dist = float("inf")
+
+    for opponent in wm.opponents():
+        if opponent is None or opponent.unum() <= 0 or opponent.pos_count() > 8 or opponent.is_ghost():
+            continue
+        min_dist = min(min_dist, opponent.pos().dist(point))
+
+    return min_dist if min_dist != float("inf") else 99.0
+
+
+def find_block_target(wm: "WorldModel") -> Vector2D | None:
+    from base.tools import Tools
+
+    opp_min = wm.intercept_table().opponent_reach_cycle()
+    ball_pos = wm.ball().inertia_point(opp_min)
+    dribble_speed_estimate = 0.7
+    dribble_angle_estimate = (Vector2D(-52.0, 0) - ball_pos).th()
+    blocker = 0
+    block_cycle = 1000
+    block_pos = None
+
+    for unum in range(1, 12):
+        tm = wm.our_player(unum)
+        if tm is None:
+            continue
+        if tm.unum() < 1:
+            continue
+        for c in range(1, 40):
+            dribble_pos = ball_pos + Vector2D.polar2vector(c * dribble_speed_estimate, dribble_angle_estimate)
+            turn_cycle = Tools.predict_player_turn_cycle(
+                tm.player_type(),
+                tm.body(),
+                tm.vel().r(),
+                tm.pos().dist(dribble_pos),
+                (dribble_pos - tm.pos()).th(),
+                0.2,
+                False,
+            )
+            tm_cycle = tm.player_type().cycles_to_reach_distance(tm.inertia_point(opp_min).dist(dribble_pos)) + turn_cycle
+            if tm_cycle <= opp_min + c:
+                if tm_cycle < block_cycle:
+                    block_cycle = tm_cycle
+                    blocker = unum
+                    block_pos = dribble_pos
+                break
+
+    if blocker == wm.self_unum() and block_pos is not None:
+        return block_pos.copy()
+    return None
+
+
 def shifted_formation_position(wm: "WorldModel") -> Vector2D:
     StrategyFormation.i().update(wm)
     base = StrategyFormation.i().get_pos(wm.self().unum()).copy()
     ball = wm.ball().pos()
+    unum = wm.self().unum()
+    self_min = wm.intercept_table().self_reach_cycle()
+    mate_min = wm.intercept_table().teammate_reach_cycle()
+    opp_min = wm.intercept_table().opponent_reach_cycle()
 
     x_shift = clamp(ball.x() * 0.35, -15.0, 15.0)
 
@@ -555,54 +690,51 @@ def shifted_formation_position(wm: "WorldModel") -> Vector2D:
     y_shift = clamp(ball.y() * y_coeff, -12.0, 12.0)
 
     target = Vector2D(base.x() + x_shift, base.y() + y_shift)
+    if opp_min + 1 < min(self_min, mate_min) or ball.x() < -18.0:
+        target._x -= defensive_retreat(unum)
+        cover_bias = 0.45 if unum in (2, 3, 4, 5) else 0.30 if unum in (6, 7, 8) else 0.15
+        target._y += clamp((ball.y() - target.y()) * cover_bias, -6.0, 6.0)
+
+    if ball.x() < -28.0 and unum in (2, 3, 4, 5, 6, 7, 8):
+        target._x = min(target.x(), base.x() - 2.0)
+
     return clamp_to_field(target, margin_x=3.0, margin_y=1.5)
 
 
-def should_force_formation_only(wm: "WorldModel") -> bool:
-    game_mode = wm.game_mode()
-    game_mode_type = game_mode.type()
+def choose_dribble_target(wm: "WorldModel") -> Vector2D:
+    sp = ServerParam.i()
+    me = wm.self().pos()
+    nearest_dist = float("inf")
+    nearest_opp = None
 
-    if game_mode_type in (
-        GameModeType.BeforeKickOff,
-        GameModeType.AfterGoal_Left,
-        GameModeType.AfterGoal_Right,
-    ):
-        return True
+    for opponent in wm.opponents():
+        if opponent is None or opponent.unum() <= 0 or opponent.pos_count() > 8 or opponent.is_ghost():
+            continue
+        dist = opponent.pos().dist(me)
+        if dist < nearest_dist:
+            nearest_dist = dist
+            nearest_opp = opponent
 
-    opponent_restart_modes = {
-        GameModeType.KickOff_Left,
-        GameModeType.KickOff_Right,
-        GameModeType.KickIn_Left,
-        GameModeType.KickIn_Right,
-        GameModeType.GoalKick_Left,
-        GameModeType.GoalKick_Right,
-        GameModeType.CornerKick_Left,
-        GameModeType.CornerKick_Right,
-        GameModeType.FreeKick_Left,
-        GameModeType.FreeKick_Right,
-        GameModeType.IndFreeKick_Left,
-        GameModeType.IndFreeKick_Right,
-        GameModeType.GoalieCatchBall_Left,
-        GameModeType.GoalieCatchBall_Right,
-    }
+    if nearest_opp is None or nearest_dist > 6.0:
+        target = Vector2D(sp.pitch_half_length(), 0.0)
+        return clamp_to_field(target, margin_x=2.0, margin_y=2.0)
 
-    if game_mode_type not in opponent_restart_modes:
-        return False
+    lateral_offset = 8.0 if nearest_opp.pos().y() <= me.y() else -8.0
+    target = Vector2D(
+        min(sp.pitch_half_length() - 2.0, me.x() + 12.0),
+        me.y() + lateral_offset,
+    )
+    return clamp_to_field(target, margin_x=2.0, margin_y=2.0)
 
-    is_opponent_restart = game_mode.side() != wm.our_side()
 
-    if not is_opponent_restart:
-        return False
+def defensive_retreat(unum: int) -> float:
+    if unum in (2, 3, 4, 5):
+        return 6.0
+    if unum in (6, 7, 8):
+        return 4.0
+    return 2.0
 
-    # During opponent KickIn, allow the nearest player to approach the ball
-    # instead of standing passively in formation
-    if game_mode_type in (GameModeType.KickIn_Left, GameModeType.KickIn_Right):
-        self_min = wm.intercept_table().self_reach_cycle()
-        mate_min = wm.intercept_table().teammate_reach_cycle()
-        if self_min <= mate_min + 2:
-            return False
 
-    return True
 
 
 def clamp_to_field(point: Vector2D, margin_x: float = 1.0, margin_y: float = 1.0) -> Vector2D:
