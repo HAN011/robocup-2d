@@ -1,4 +1,3 @@
-from turtle import pos
 from lib.action.intercept_table import InterceptTable
 from lib.debug.debug import log
 from lib.player.localizer import Localizer
@@ -1324,7 +1323,9 @@ class WorldModel:
 
     def update_by_full_state_message(self, parser: FullStateWorldMessageParser):
         self._time._cycle = int(parser.dic()['time'])
-        self._game_mode.set_game_mode(GameModeType(parser.dic()['pmode']))
+        play_mode = GameMode._resolve_game_mode(parser.dic()['pmode'])
+        if play_mode is not None:
+            self._game_mode.set_game_mode(play_mode)
 
         # TODO vmode counters and arm
 

@@ -213,6 +213,8 @@ class BhvPassGen(BhvKickGen):
                     continue
 
                 nearest_receiver = Tools.get_nearest_teammate(wm, receive_point, self.receivers)
+                if nearest_receiver is None:
+                    continue
                 if nearest_receiver.unum() != receiver.unum():
                     if debug_pass:
                         log.sw_log().pass_().add_text(
@@ -319,6 +321,8 @@ class BhvPassGen(BhvKickGen):
                     continue
 
                 nearest_receiver = Tools.get_nearest_teammate(wm, receive_point, self.receivers)
+                if nearest_receiver is None:
+                    continue
                 if nearest_receiver.unum() != receiver.unum():
                     if debug_pass:
                         log.sw_log().pass_().add_text(
@@ -576,4 +580,3 @@ class BhvPassGen(BhvKickGen):
             if n_step - bonus_step <= cycle:
                 return cycle, ball_pos
         return 1000, None
-

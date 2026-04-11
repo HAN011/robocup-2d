@@ -4,6 +4,10 @@ from lib.debug.debug import log
 
 
 class GameMode:
+    _MODE_ALIASES = {
+        "time_up": GameModeType.TimeOver,
+    }
+
     def __init__(self, game_mode: GameModeType = GameModeType.BeforeKickOff, time=GameTime()):
         self._game_mode: GameModeType = game_mode
         self._mode_name: str = None
@@ -50,6 +54,18 @@ class GameMode:
     def set_game_mode(self, play_mode: GameModeType):
         self.__init__(play_mode)
 
+    @classmethod
+    def _resolve_game_mode(cls, mode: str) -> GameModeType | None:
+        alias = cls._MODE_ALIASES.get(mode)
+        if alias is not None:
+            return alias
+
+        try:
+            return GameModeType(mode)
+        except ValueError:
+            log.os_log().warning(f"unknown referee game mode ignored: {mode}")
+            return None
+
     def is_teams_set_play(self, team_side: SideID):
         if team_side == SideID.LEFT:
             if self.type() in [GameModeType.KickOff_Left,
@@ -91,7 +107,8 @@ class GameMode:
         return self.is_teams_set_play(our_side)
 
     def update(self, mode: str, current_time: GameTime):
-        mode = mode[:mode.find(')')]
+        if ')' in mode:
+            mode = mode[:mode.find(')')]
         if mode.startswith("yellow") or mode.startswith("red") or mode == 'foul_l' or mode == 'foul_r':
             return False
         
@@ -107,8 +124,10 @@ class GameMode:
             game_mode = GameModeType.AfterGoal_Right
         
         if game_mode is None:
-            game_mode = GameModeType(mode)
-        
+            game_mode = self._resolve_game_mode(mode)
+            if game_mode is None:
+                return False
+
         if (self._game_mode.is_goalie_catch_ball()
             and game_mode.is_free_kick()
             and self._game_mode.side() == game_mode.side()
@@ -118,7 +137,8 @@ class GameMode:
 
         else:
             self._game_mode = game_mode
-            self._side = self._game_mode.side()
+        self._mode_name = self._set_mode_name()
+        self._side = self._set_side()
         self._time = current_time.copy()
         return True
     

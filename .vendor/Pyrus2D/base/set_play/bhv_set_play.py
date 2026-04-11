@@ -62,18 +62,20 @@ class Bhv_SetPlay:
     @staticmethod
     def is_kicker(agent):
         wm = agent.world()
-        if wm.game_mode().mode_name() == "goalie_catch" and \
-                wm.game_mode().side() == wm.our_side() and \
+        game_mode_type = wm.game_mode().type()
+        game_side = wm.game_mode().side()
+        if game_mode_type.is_goalie_catch_ball() and \
+                game_side == wm.our_side() and \
                 not wm.self().goalie():
             log.sw_log().team().add_text( "(is_kicker) goalie free kick")
             return False
         if not wm.self().goalie() and \
-                wm.game_mode().mode_name() == "goal_kick" and \
-                wm.game_mode().side() == wm.our_side():
+                game_mode_type.is_goal_kick() and \
+                game_side == wm.our_side():
             return False
         if wm.self().goalie() and \
-                wm.game_mode().mode_name() == "goal_kick" and \
-                wm.game_mode().side() == wm.our_side():
+                game_mode_type.is_goal_kick() and \
+                game_side == wm.our_side():
             return True
         st = StrategyFormation().i()
         kicker_unum = 0
@@ -156,7 +158,11 @@ class Bhv_SetPlay:
             return True
 
         action_candidates: list[KickAction] = []
-        action_candidates += BhvPassGen().generator(wm)
+        try:
+            action_candidates += BhvPassGen().generator(wm)
+        except Exception as exc:
+            log.os_log().error(f"Bhv_SetPlay pass generation failed, fallback to move: {exc}")
+            return False
         if len(action_candidates) == 0:
             return False
 

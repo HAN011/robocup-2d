@@ -64,6 +64,8 @@ class Tools:
         best_player: 'PlayerObject' = None
         min_dist2 = 1000
         for player in players:
+            if player is None:
+                continue
             d2 = player.pos().dist2( position )
             if d2 < min_dist2:
                 min_dist2 = d2

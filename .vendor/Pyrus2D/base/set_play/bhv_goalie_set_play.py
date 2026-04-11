@@ -122,7 +122,11 @@ class Bhv_GoalieSetPlay:
     def do_kick(self, agent: 'PlayerAgent'):
         wm = agent.world()
         action_candidates: list[KickAction] = []
-        action_candidates += BhvPassGen().generator(wm)
+        try:
+            action_candidates += BhvPassGen().generator(wm)
+        except Exception as exc:
+            log.os_log().error(f"goalie set play pass generation failed, fallback to hold ball: {exc}")
+            action_candidates = []
 
         if len(action_candidates) == 0:
             agent.set_neck_action(NeckScanField())

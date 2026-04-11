@@ -117,7 +117,7 @@ class BhvShhotGen(BhvKickGen):
 
         for o in range(1, 12):
             opp = wm.their_player(o)
-            if opp.unum() < 1:
+            if opp is None or opp.unum() < 1:
                 log.sw_log().shoot().add_text( '## opp {} can not, unum')
                 continue
             if opp.is_tackling():
@@ -211,7 +211,7 @@ class BhvShhotGen(BhvKickGen):
                 return True
 
             if in_penalty_area and n_step <= cycle + goalie.pos_count() + 1:
-                course.goalie_never_reach_ = False
+                course.goalie_never_reach = False
         return False
 
     def opponent_can_reach(self, opponent, course: ShootAction, wm: 'WorldModel'):
@@ -287,7 +287,7 @@ class BhvShhotGen(BhvKickGen):
                 score += 100.0
 
             goalie_rate = 1.0
-            if goalie.unum() > 0:
+            if goalie is not None and goalie.unum() > 0:
                 variance2 = 1.0 if it.goalie_never_reach else pow(10.0, 2)
                 angle_diff = (it.ball_move_angle - goalie_angle).abs()
                 goalie_rate = 1.0 - math.exp(-pow(angle_diff, 2) / (2.0 * variance2) )
@@ -299,4 +299,4 @@ class BhvShhotGen(BhvKickGen):
 
             score *= goalie_rate
             score *= y_rate
-            it.score_ = score
+            it.score = score

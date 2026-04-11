@@ -406,6 +406,9 @@ class PlayerAgent(SoccerAgent):
         if self.world().self().is_frozen():
             log.os_log().error(f"(do turn) player({self._real_world.self_unum()} is frozen!")
             return False
+        max_turn = ServerParam.i().max_moment()
+        effective_turn = self.world().self().player_type().effective_turn(max_turn, self.world().self().vel().r())
+        angle = max(-effective_turn, min(effective_turn, float(angle)))
         self._last_body_command.append(self._effector.set_turn(float(angle)))
         return True
 
@@ -451,7 +454,14 @@ class PlayerAgent(SoccerAgent):
         self._last_body_command.append(self.effector().set_catch())
 
     def do_turn_neck(self, moment: AngleDeg) -> bool:
-        self._last_body_command.append(self._effector.set_turn_neck(moment))
+        SP = ServerParam.i()
+        current_neck = self.world().self().neck().degree()
+        desired = float(moment)
+        desired = max(SP.min_neck_moment(), min(SP.max_neck_moment(), desired))
+        next_neck = current_neck + desired
+        next_neck = max(SP.min_neck_angle(), min(SP.max_neck_angle(), next_neck))
+        desired = next_neck - current_neck
+        self._last_body_command.append(self._effector.set_turn_neck(desired))
         return True
 
     def do_change_view(self, width: ViewWidth) -> bool:

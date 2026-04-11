@@ -116,7 +116,7 @@ class LineID(Enum):
     Line_Right = 'r'
     Line_Top = 't'
     Line_Bottom = 'b'
-    Line_Unknown = auto()
+    Line_Unknown = "unknown"
 
 
 """
