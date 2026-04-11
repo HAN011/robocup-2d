@@ -3,11 +3,24 @@ from __future__ import annotations
 
 import datetime
 import logging
+import os
 import sys
+from pathlib import Path
 
 
-TEAM_NAME = "Pyrus433"
-LOG_PATH = f"logs/{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
+TEAM_NAME = "Aurora"
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _default_log_path() -> str:
+    raw_root = os.environ.get("ROBOCUP_LOG_ROOT", "log").strip() or "log"
+    log_root = Path(raw_root)
+    if not log_root.is_absolute():
+        log_root = PROJECT_ROOT / log_root
+    return str(log_root / "agents" / datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S"))
+
+
+LOG_PATH = _default_log_path()
 FILE_LOG_LEVEL = logging.ERROR
 DISABLE_FILE_LOG = False
 CONSOLE_LOG_LEVEL = logging.ERROR
@@ -21,8 +34,8 @@ SOCKET_INTERVAL = 0.01
 WAIT_TIME_THR_SYNCH_VIEW = 30
 WAIT_TIME_THR_NOSYNCH_VIEW = 75
 
-PLAYER_VERSION = 19
-COACH_VERSION = 19
+PLAYER_VERSION = 18
+COACH_VERSION = 18
 
 WORLD_IS_FULL_WORLD_IF_EXIST = True
 WORLD_IS_REAL_WORLD = True

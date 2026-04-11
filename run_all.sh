@@ -9,7 +9,12 @@ PORT="${3:-6000}"
 OPPONENT_TEAM="${4:-${TEAM}_Opponent}"
 OFFLINE_TRAINER_PORT="$((PORT + 1))"
 ONLINE_COACH_PORT="$((PORT + 2))"
-LOG_DIR="${PROJECT_ROOT}/logs"
+DEFAULT_LOG_ROOT="${ROBOCUP_LOG_ROOT:-log}"
+RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S_%N)}"
+if [[ "${DEFAULT_LOG_ROOT}" != /* ]]; then
+  DEFAULT_LOG_ROOT="${PROJECT_ROOT}/${DEFAULT_LOG_ROOT}"
+fi
+LOG_DIR="${LOG_DIR:-${DEFAULT_LOG_ROOT}/run_all/${RUN_ID}}"
 RCSS_RECORD_DIR="${RCSS_RECORD_DIR:-${LOG_DIR}/server_records}"
 RCSS_LD_LIBRARY_PATH="/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 RCSSSERVER_BIN="${RCSSSERVER_BIN:-/usr/local/bin/rcssserver}"

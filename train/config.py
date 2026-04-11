@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 
 
+LOG_ROOT = os.environ.get("ROBOCUP_LOG_ROOT", "log")
+
 LEARNING_RATE = 3e-4
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
@@ -11,7 +13,7 @@ EPOCHS_PER_UPDATE = 4
 BATCH_SIZE = 64
 SAVE_INTERVAL = 50
 TOTAL_EPISODES = 5000
-CHECKPOINT_DIR = "train/checkpoints"
+CHECKPOINT_DIR = os.path.join(LOG_ROOT, "train", "checkpoints")
 
 OBSERVATION_SIZE = 52
 ACTION_SIZE = 18
@@ -42,7 +44,7 @@ HEARTBEAT_INTERVAL = int(os.environ.get("ROBOCUP_RL_HEARTBEAT_INTERVAL", "100"))
 NUM_WORKERS = int(os.environ.get("ROBOCUP_RL_NUM_WORKERS", "2"))
 SERVER_PORT_STRIDE = int(os.environ.get("ROBOCUP_RL_SERVER_PORT_STRIDE", "20"))
 ROLLOUT_DEVICE = os.environ.get("ROBOCUP_RL_ROLLOUT_DEVICE", "cpu")
-HOME_LOG_SUBDIR = os.environ.get("ROBOCUP_RL_HOME_LOG_SUBDIR", "logs/train")
+HOME_LOG_SUBDIR = os.environ.get("ROBOCUP_RL_HOME_LOG_SUBDIR", os.path.join(LOG_ROOT, "train", "episodes"))
 
 BRIDGE_HOST_ENV = "ROBOCUP_RL_BRIDGE_HOST"
 BRIDGE_PORT_ENV = "ROBOCUP_RL_BRIDGE_PORT"

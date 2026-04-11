@@ -6,11 +6,17 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEAM="${1:-}"
 HOST="${2:-localhost}"
 PORT="${3:-6000}"
-LOG_DIR="${LOG_DIR:-${PROJECT_ROOT}/logs}"
+DEFAULT_LOG_ROOT="${ROBOCUP_LOG_ROOT:-log}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 PLAYER_DELAY="${PLAYER_DELAY:-0.1}"
-RUN_ID="$(date +%Y%m%d_%H%M%S_%N)"
-INTERNAL_LOG_ROOT="${LOG_DIR}/runtime/${RUN_ID}"
+RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S_%N)}"
+
+if [[ "${DEFAULT_LOG_ROOT}" != /* ]]; then
+  DEFAULT_LOG_ROOT="${PROJECT_ROOT}/${DEFAULT_LOG_ROOT}"
+fi
+
+LOG_DIR="${LOG_DIR:-${DEFAULT_LOG_ROOT}/start/${RUN_ID}}"
+INTERNAL_LOG_ROOT="${LOG_DIR}/runtime"
 
 if [[ -z "${TEAM}" ]]; then
   echo "Usage: $0 TEAM [HOST] [PORT]" >&2
@@ -32,6 +38,7 @@ resolve_python_bin() {
   local candidate
   local candidates=(
     "${PYTHON_BIN:-}"
+    "${PROJECT_ROOT}/python/bin/python"
     "${HOME}/anaconda3/envs/robocup2d/bin/python"
     "${HOME}/miniconda3/envs/robocup2d/bin/python"
     "${CONDA_PREFIX:-}/bin/python"

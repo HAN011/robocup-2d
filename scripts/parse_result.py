@@ -55,6 +55,12 @@ def parse_rcg(path: pathlib.Path) -> tuple[str, int, int, str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Parse final score from an rcssserver .rcg log")
     parser.add_argument("rcg_file", type=pathlib.Path, help="Path to .rcg file")
+    parser.add_argument(
+        "--format",
+        choices=("text", "tsv"),
+        default="text",
+        help="Output format. 'text' prints a readable score line, 'tsv' prints tab-separated fields.",
+    )
     args = parser.parse_args()
 
     rcg_path = args.rcg_file.resolve()
@@ -68,7 +74,10 @@ def main() -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    print(f"{left_team} {left_score} - {right_score} {right_team}")
+    if args.format == "tsv":
+        print(f"{left_team}\t{right_team}\t{left_score}\t{right_score}")
+    else:
+        print(f"{left_team} {left_score} - {right_score} {right_team}")
     return 0
 
 

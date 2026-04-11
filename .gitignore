@@ -4,6 +4,7 @@ __pycache__/
 *.pyd
 
 .claude/
+log/
 logs/
 opponents/
 results/
@@ -15,3 +16,5 @@ train/checkpoints_v17_backup/
 *.kwy
 
 *.pdf
+
+submission/dist/

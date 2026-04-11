@@ -10,6 +10,7 @@ PARSE_RESULT_SCRIPT="${SCRIPTS_DIR}/parse_result.py"
 
 HOST="${HOST:-localhost}"
 PORT="${PORT:-6000}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 SERVER_DELAY="${SERVER_DELAY:-1}"
 VISUAL="${VISUAL:-0}"
 MONITOR_DELAY="${MONITOR_DELAY:-1}"
@@ -18,6 +19,9 @@ HALF_TIME_SECONDS="${HALF_TIME_SECONDS:-${HALF_TIME_CYCLES:-300}}"
 NR_NORMAL_HALFS="${NR_NORMAL_HALFS:-2}"
 SIM_STEP_MS="${SIM_STEP_MS:-100}"
 MATCH_TIMEOUT="${MATCH_TIMEOUT:-}"
+CONNECT_WAIT="${CONNECT_WAIT:-20}"
+KICK_OFF_WAIT="${KICK_OFF_WAIT:-20}"
+GAME_OVER_WAIT="${GAME_OVER_WAIT:-20}"
 
 if [[ -z "${MATCH_TIMEOUT}" ]]; then
   expected_match_sec=$(( HALF_TIME_SECONDS * NR_NORMAL_HALFS ))
@@ -28,8 +32,13 @@ if [[ -z "${MATCH_TIMEOUT}" ]]; then
   MATCH_TIMEOUT=$(( expected_match_sec + timeout_buffer ))
 fi
 
+DEFAULT_LOG_ROOT="${ROBOCUP_LOG_ROOT:-log}"
+if [[ "${DEFAULT_LOG_ROOT}" != /* ]]; then
+  DEFAULT_LOG_ROOT="${PROJECT_ROOT}/${DEFAULT_LOG_ROOT}"
+fi
+
 RESULT_DIR="${PROJECT_ROOT}/results"
-MATCH_LOG_ROOT="${PROJECT_ROOT}/logs/matches"
+MATCH_LOG_ROOT="${MATCH_LOG_ROOT:-${DEFAULT_LOG_ROOT}/matches}"
 
 MY_TEAM_NAME=""
 CURRENT_SERVER_PID=""
@@ -37,6 +46,35 @@ CURRENT_HOME_LAUNCHER_PID=""
 CURRENT_OPPONENT_LAUNCHER_PID=""
 CURRENT_MONITOR_PID=""
 CURRENT_OPPONENT_DIR=""
+
+python_supports_submission_runtime() {
+  local candidate="$1"
+  [[ -x "${candidate}" ]] || return 1
+  "${candidate}" -c 'import sys; print(sys.version_info[0])' >/dev/null 2>&1
+}
+
+resolve_python_bin() {
+  local candidate
+  local candidates=(
+    "${PYTHON_BIN:-}"
+    "${PROJECT_ROOT}/python/bin/python"
+    "${HOME}/anaconda3/envs/robocup2d/bin/python"
+    "${HOME}/miniconda3/envs/robocup2d/bin/python"
+    "${CONDA_PREFIX:-}/bin/python"
+    "$(command -v python3 2>/dev/null || true)"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "${candidate}" ]] && python_supports_submission_runtime "${candidate}"; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+
+  printf '%s\n' "python3"
+}
+
+RUN_PYTHON_BIN="$(resolve_python_bin)"
 
 usage() {
   cat <<'EOF' >&2
@@ -107,7 +145,7 @@ resolve_my_team_name() {
   fi
 
   local team_name
-  team_name="$(PYTHONPATH="${PROJECT_ROOT}" python3 - <<'PY'
+  team_name="$(PYTHONPATH="${PROJECT_ROOT}" "${RUN_PYTHON_BIN}" - <<'PY'
 try:
     import team_config
     print(getattr(team_config, "TEAM_NAME", "MyTeam"))
@@ -174,6 +212,86 @@ parse_server_score() {
   local right_score="${BASH_REMATCH[2]}"
 
   printf '%s\t%s\t%s\t%s\n' "${left_team}" "${right_team}" "${left_score}" "${right_score}"
+}
+
+parse_rcg_score() {
+  local record_dir="$1"
+  local rcg_file
+
+  rcg_file="$(find "${record_dir}" -maxdepth 1 -type f -name '*.rcg' | sort | tail -n1 || true)"
+  if [[ -z "${rcg_file}" || ! -f "${rcg_file}" || ! -f "${PARSE_RESULT_SCRIPT}" ]]; then
+    return 1
+  fi
+
+  "${RUN_PYTHON_BIN}" "${PARSE_RESULT_SCRIPT}" --format tsv "${rcg_file}" 2>/dev/null
+}
+
+parse_match_score() {
+  local server_log="$1"
+  local record_dir="$2"
+  local parsed_score
+
+  parsed_score="$(parse_server_score "${server_log}" || true)"
+  if [[ -n "${parsed_score}" ]]; then
+    printf '%s\n' "${parsed_score}"
+    return 0
+  fi
+
+  parsed_score="$(parse_rcg_score "${record_dir}" || true)"
+  if [[ -n "${parsed_score}" ]]; then
+    printf '%s\n' "${parsed_score}"
+    return 0
+  fi
+
+  return 1
+}
+
+finalize_match_result() {
+  local pid="$1"
+  local server_log="$2"
+  local record_dir="$3"
+  local timeout_reason="${4:-0}"
+  local parsed_score=""
+  local wait_sec
+
+  parsed_score="$(parse_match_score "${server_log}" "${record_dir}" || true)"
+  if [[ -n "${parsed_score}" ]]; then
+    printf '%s\n' "${parsed_score}"
+    return 0
+  fi
+
+  if kill -0 "${pid}" 2>/dev/null; then
+    if [[ "${timeout_reason}" == "1" ]]; then
+      log "match timeout reached; terminating rcssserver to flush final result"
+    fi
+    kill "${pid}" 2>/dev/null || true
+  fi
+
+  for wait_sec in 1 2 3 4 5; do
+    parsed_score="$(parse_match_score "${server_log}" "${record_dir}" || true)"
+    if [[ -n "${parsed_score}" ]]; then
+      printf '%s\n' "${parsed_score}"
+      return 0
+    fi
+
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      wait "${pid}" >/dev/null 2>&1 || true
+    fi
+    sleep 1
+  done
+
+  if kill -0 "${pid}" 2>/dev/null; then
+    kill -9 "${pid}" 2>/dev/null || true
+    wait "${pid}" >/dev/null 2>&1 || true
+  fi
+
+  parsed_score="$(parse_match_score "${server_log}" "${record_dir}" || true)"
+  if [[ -n "${parsed_score}" ]]; then
+    printf '%s\n' "${parsed_score}"
+    return 0
+  fi
+
+  return 1
 }
 
 resolve_rcssserver_bin() {
@@ -340,9 +458,9 @@ EOF
       "server::synch_mode=0" \
       "server::half_time=${HALF_TIME_SECONDS}" \
       "server::nr_normal_halfs=${NR_NORMAL_HALFS}" \
-      "server::connect_wait=20" \
-      "server::kick_off_wait=20" \
-      "server::game_over_wait=20" \
+      "server::connect_wait=${CONNECT_WAIT}" \
+      "server::kick_off_wait=${KICK_OFF_WAIT}" \
+      "server::game_over_wait=${GAME_OVER_WAIT}" \
       "server::game_log_dir=${record_dir}" \
       "server::text_log_dir=${record_dir}" \
       "server::keepaway_log_dir=${record_dir}" \
@@ -371,15 +489,22 @@ EOF
     ) >"${opponent_log}" 2>&1 &
     CURRENT_OPPONENT_LAUNCHER_PID="$!"
 
-    if ! wait_for_match_result "${CURRENT_SERVER_PID}" "${MATCH_TIMEOUT}" "${server_log}"; then
-      echo "Match ${i}: ERROR timeout or server crash" | tee -a "${result_file}" >&2
-      exit 1
+    local wait_status=0
+    local score_fields
+    if wait_for_match_result "${CURRENT_SERVER_PID}" "${MATCH_TIMEOUT}" "${server_log}"; then
+      score_fields="$(parse_match_score "${server_log}" "${record_dir}" || true)"
+    else
+      wait_status=$?
+      score_fields="$(finalize_match_result "${CURRENT_SERVER_PID}" "${server_log}" "${record_dir}" "$(( wait_status == 124 ? 1 : 0 ))" || true)"
+      if [[ -z "${score_fields}" ]]; then
+        echo "Match ${i}: ERROR timeout or server crash" | tee -a "${result_file}" >&2
+        exit 1
+      fi
     fi
+
     cleanup_match_processes
     CURRENT_SERVER_PID=""
 
-    local score_fields
-    score_fields="$(parse_server_score "${server_log}" || true)"
     if [[ -z "${score_fields}" ]]; then
       echo "Match ${i}: ERROR failed to parse score from ${server_log}" | tee -a "${result_file}" >&2
       exit 1
@@ -415,7 +540,7 @@ EOF
     rcg_file="$(find "${record_dir}" -maxdepth 1 -type f -name '*.rcg' | sort | tail -n1 || true)"
     rcg_result=""
     if [[ -n "${rcg_file}" && -f "${PARSE_RESULT_SCRIPT}" ]]; then
-      rcg_result="$(python3 "${PARSE_RESULT_SCRIPT}" "${rcg_file}" 2>/dev/null || true)"
+      rcg_result="$("${RUN_PYTHON_BIN}" "${PARSE_RESULT_SCRIPT}" "${rcg_file}" 2>/dev/null || true)"
     fi
 
     local match_line="Match ${i}: ${MY_TEAM_NAME} ${my_score} - ${opp_score} ${displayed_opp_team}"

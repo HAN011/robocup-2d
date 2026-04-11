@@ -15,6 +15,9 @@ from train.env import RoboCupEnv
 from train.policy_net import ActorCriticPolicy
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a RoboCup 2D PPO policy")
     parser.add_argument("--resume", nargs="?", const="latest", default=None, help="resume from checkpoint path or latest")
@@ -47,6 +50,11 @@ def resolve_device(device_name: str) -> torch.device:
     if device_name == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device_name)
+
+
+def resolve_project_path(path_like: str | Path) -> Path:
+    path = Path(path_like)
+    return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 def latest_checkpoint(checkpoint_dir: Path) -> Path | None:
@@ -495,7 +503,7 @@ def run_single_worker_training(
 def main() -> int:
     args = build_parser().parse_args()
     device = resolve_device(args.device)
-    checkpoint_dir = Path(config.CHECKPOINT_DIR)
+    checkpoint_dir = resolve_project_path(config.CHECKPOINT_DIR)
     args.num_workers = max(1, args.num_workers)
     args.port_stride = max(4, args.port_stride)
 
