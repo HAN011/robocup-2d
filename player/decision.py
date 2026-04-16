@@ -29,6 +29,7 @@ from lib.debug.debug import log
 from lib.player.soccer_action import BodyAction, NeckAction
 from lib.rcsc.types import GameModeType
 from lib.rcsc.server_param import ServerParam
+from player.experiment_profile import get_experiment_profile
 from pyrusgeom.vector_2d import Vector2D
 
 if TYPE_CHECKING:
@@ -373,6 +374,11 @@ def action_from_rl_id(action_id: int, wm: "WorldModel") -> Action:
 
 
 def decide_on_ball_action(agent: "PlayerAgent") -> Action:
+    wm = agent.world()
+    experiment_action = decide_experiment_on_ball_action(wm)
+    if experiment_action is not None:
+        return experiment_action
+
     return Action(
         body=Body_BhvKick(),
         neck=None,
@@ -391,12 +397,28 @@ def decide_on_ball_fallback_action(wm: "WorldModel") -> Action:
     return dribble_action(wm)
 
 
+def decide_experiment_on_ball_action(wm: "WorldModel") -> Action | None:
+    clearance_label = defensive_clearance_label(wm)
+    if clearance_label is not None:
+        return clearance_action(wm, clearance_label)
+
+    profile = get_experiment_profile()
+    if profile.transition_unlock:
+        transition_action = decide_transition_unlock_action(wm)
+        if transition_action is not None:
+            return transition_action
+
+    return None
+
+
 def decide_off_ball_action(wm: "WorldModel") -> Action:
+    profile = get_experiment_profile()
     sp = ServerParam.i()
     self_min = wm.intercept_table().self_reach_cycle()
     mate_min = wm.intercept_table().teammate_reach_cycle()
     opp_min = wm.intercept_table().opponent_reach_cycle()
     ball_near_sideline = abs(wm.ball().pos().y()) > sp.pitch_half_width() - 8.0
+    flank_lock_alert = profile.flank_lock and wm.ball().pos().x() < 8.0 and abs(wm.ball().pos().y()) > 18.0
     urgent_defense = (
         wm.ball().pos().x() < -12.0
         and self_min <= mate_min + 1
@@ -411,6 +433,7 @@ def decide_off_ball_action(wm: "WorldModel") -> Action:
             self_min <= 3
             or (self_min <= mate_min and self_min < opp_min + 3)
             or (ball_near_sideline and self_min <= mate_min + 1)
+            or (flank_lock_alert and self_min <= mate_min + 2 and self_min <= opp_min + 3)
         )
     ):
         return Action(
@@ -422,6 +445,8 @@ def decide_off_ball_action(wm: "WorldModel") -> Action:
 
     if opp_min < mate_min:
         block_target = find_block_target(wm)
+        if block_target is None and flank_lock_alert:
+            block_target = flank_lock_block_target(wm)
         return Action(
             body=Body_BhvBlock(),
             neck=None,
@@ -506,20 +531,24 @@ def shoot_action(wm: "WorldModel") -> Action:
     )
 
 
-def pass_action(wm: "WorldModel", teammate: "PlayerObject") -> Action:
+def pass_action(wm: "WorldModel", teammate: "PlayerObject", aggressive: bool = False) -> Action:
     start_speed = clamp(wm.self().pos().dist(teammate.pos()) * 0.18 + 1.0, 1.2, 2.7)
+    if aggressive:
+        start_speed = clamp(start_speed + 0.35, 1.4, 3.0)
     return Action(
         body=Body_KickOneStep(teammate.pos(), start_speed),
         neck=Neck_TurnToBall(),
-        label=f"pass_{teammate.unum()}",
+        label=f"{'direct_' if aggressive else ''}pass_{teammate.unum()}",
         decision_target=teammate.pos().copy(),
     )
 
 
-def dribble_action(wm: "WorldModel") -> Action:
+def dribble_action(wm: "WorldModel", advance: float | None = None) -> Action:
     goal_target = choose_dribble_target(wm)
+    if advance is None:
+        advance = 6.0 if get_experiment_profile().transition_unlock and wm.self().pos().x() > -5.0 else 4.0
     return Action(
-        body=Body_Dribble(goal_target),
+        body=Body_Dribble(goal_target, advance=advance),
         neck=Neck_TurnToBall(),
         label="dribble",
         decision_target=goal_target,
@@ -527,15 +556,19 @@ def dribble_action(wm: "WorldModel") -> Action:
 
 
 def in_shooting_range(wm: "WorldModel") -> bool:
+    profile = get_experiment_profile()
     sp = ServerParam.i()
     goal_center = Vector2D(sp.pitch_half_length(), 0.0)
     goal_vector = goal_center - wm.self().pos()
     goal_distance = goal_vector.r()
     goal_angle = (goal_vector.th() - wm.self().body()).abs()
-    return goal_distance < 20.0 and goal_angle < 30.0
+    max_distance = 24.0 if profile.transition_unlock else 20.0
+    max_angle = 38.0 if profile.transition_unlock else 30.0
+    return goal_distance < max_distance and goal_angle < max_angle
 
 
 def find_best_pass_target(wm: "WorldModel"):
+    profile = get_experiment_profile()
     me = wm.self()
     candidates: list[tuple[float, "PlayerObject"]] = []
     under_pressure = (
@@ -544,6 +577,8 @@ def find_best_pass_target(wm: "WorldModel"):
         or nearest_valid_opponent_distance(wm, me.pos()) < 6.0
     )
     allow_reset_pass = under_pressure or me.pos().x() < -5.0
+    if (profile.setplay_shield or profile.box_clear) and me.pos().x() < -25.0:
+        allow_reset_pass = False
 
     for teammate in wm.teammates():
         if teammate is None:
@@ -552,9 +587,13 @@ def find_best_pass_target(wm: "WorldModel"):
             continue
         if teammate.goalie():
             continue
+        if profile.transition_unlock and me.pos().x() > -5.0 and teammate.pos().x() < me.pos().x() - 2.0:
+            continue
         if teammate.pos().x() < me.pos().x() - 10.0 and not allow_reset_pass:
             continue
         if me.pos().x() < -25.0 and teammate.pos().x() < me.pos().x() - 4.0:
+            continue
+        if (profile.setplay_shield or profile.box_clear) and me.pos().x() < -25.0 and teammate.pos().x() < me.pos().x() + 2.0:
             continue
         lane_margin = pass_lane_margin(wm, me.pos(), teammate.pos())
         if not pass_lane_clear(wm, teammate, lane_margin=lane_margin):
@@ -572,6 +611,15 @@ def find_best_pass_target(wm: "WorldModel"):
             + receiver_space
             - abs(teammate.pos().y()) * 0.08
         )
+        if profile.transition_unlock:
+            score += max(progress, 0.0) * 1.4
+            score += max(teammate.pos().x(), 0.0) * 0.08
+            score -= abs(teammate.pos().y()) * 0.03
+        if profile.setplay_shield or profile.box_clear:
+            if teammate.pos().x() < me.pos().x():
+                score -= 8.0
+            if me.pos().x() < -20.0 and abs(teammate.pos().y()) < 8.0:
+                score -= 1.5
         if teammate.pos().x() > me.pos().x():
             score += 3.0
         if allow_reset_pass and teammate.pos().x() < me.pos().x():
@@ -585,6 +633,7 @@ def find_best_pass_target(wm: "WorldModel"):
     return max(candidates, key=lambda item: item[0])[1]
 
 def pass_lane_clear(wm: "WorldModel", teammate: "PlayerObject", lane_margin: float | None = None) -> bool:
+    profile = get_experiment_profile()
     start = wm.self().pos()
     end = teammate.pos()
     margin = pass_lane_margin(wm, start, end) if lane_margin is None else lane_margin
@@ -593,6 +642,12 @@ def pass_lane_clear(wm: "WorldModel", teammate: "PlayerObject", lane_margin: flo
         threshold = 3.5
     if end.x() < start.x():
         threshold += 0.5
+    if (profile.setplay_shield or profile.box_clear) and start.x() < -20.0:
+        threshold += 0.4
+        if end.x() <= start.x():
+            threshold += 0.8
+    if profile.transition_unlock and end.x() > start.x():
+        threshold -= 0.4
     return margin >= threshold
 
 
@@ -674,7 +729,19 @@ def find_block_target(wm: "WorldModel") -> Vector2D | None:
     return None
 
 
+def flank_lock_block_target(wm: "WorldModel") -> Vector2D:
+    sp = ServerParam.i()
+    ball = wm.ball().pos()
+    sign = 1.0 if ball.y() >= 0.0 else -1.0
+    return clamp_to_field(
+        Vector2D(ball.x() - 4.0, sign * max(14.0, abs(ball.y()) - 4.0)),
+        margin_x=3.0,
+        margin_y=1.5,
+    )
+
+
 def shifted_formation_position(wm: "WorldModel") -> Vector2D:
+    profile = get_experiment_profile()
     StrategyFormation.i().update(wm)
     base = StrategyFormation.i().get_pos(wm.self().unum()).copy()
     ball = wm.ball().pos()
@@ -686,13 +753,23 @@ def shifted_formation_position(wm: "WorldModel") -> Vector2D:
     x_shift = clamp(ball.x() * 0.35, -15.0, 15.0)
 
     # Shift more aggressively toward the sideline so players follow the ball
-    y_coeff = 0.30 if abs(ball.y()) > 25.0 else 0.15
+    if profile.flank_lock and abs(ball.y()) > 18.0:
+        y_coeff = 0.42
+    else:
+        y_coeff = 0.30 if abs(ball.y()) > 25.0 else 0.15
     y_shift = clamp(ball.y() * y_coeff, -12.0, 12.0)
 
     target = Vector2D(base.x() + x_shift, base.y() + y_shift)
     if opp_min + 1 < min(self_min, mate_min) or ball.x() < -18.0:
-        target._x -= defensive_retreat(unum)
+        retreat = defensive_retreat(unum)
+        if profile.box_clear and ball.x() < -36.0 and unum in (2, 3, 4, 5, 6, 7, 8):
+            retreat += 1.5 if unum in (2, 3, 4, 5) else 1.0
+        if profile.flank_lock and ball.x() < 8.0 and abs(ball.y()) > 18.0 and unum in (2, 3, 4, 5, 6, 7, 8):
+            retreat += 1.5 if unum in (2, 3, 4, 5) else 1.0
+        target._x -= retreat
         cover_bias = 0.45 if unum in (2, 3, 4, 5) else 0.30 if unum in (6, 7, 8) else 0.15
+        if profile.flank_lock and abs(ball.y()) > 18.0:
+            cover_bias += 0.20 if unum in (2, 3, 4, 5) else 0.15 if unum in (6, 7, 8) else 0.05
         target._y += clamp((ball.y() - target.y()) * cover_bias, -6.0, 6.0)
 
     if ball.x() < -28.0 and unum in (2, 3, 4, 5, 6, 7, 8):
@@ -702,6 +779,7 @@ def shifted_formation_position(wm: "WorldModel") -> Vector2D:
 
 
 def choose_dribble_target(wm: "WorldModel") -> Vector2D:
+    profile = get_experiment_profile()
     sp = ServerParam.i()
     me = wm.self().pos()
     nearest_dist = float("inf")
@@ -716,15 +794,96 @@ def choose_dribble_target(wm: "WorldModel") -> Vector2D:
             nearest_opp = opponent
 
     if nearest_opp is None or nearest_dist > 6.0:
-        target = Vector2D(sp.pitch_half_length(), 0.0)
+        target_y = clamp(me.y() * (0.35 if profile.transition_unlock else 0.20), -10.0, 10.0)
+        target = Vector2D(sp.pitch_half_length(), target_y)
+        return clamp_to_field(target, margin_x=2.0, margin_y=2.0)
+
+    if (profile.setplay_shield or profile.box_clear) and me.x() < -20.0:
+        lateral_offset = 14.0 if me.y() <= 0.0 else -14.0
+        target = Vector2D(min(sp.pitch_half_length() - 6.0, me.x() + 18.0), me.y() + lateral_offset)
         return clamp_to_field(target, margin_x=2.0, margin_y=2.0)
 
     lateral_offset = 8.0 if nearest_opp.pos().y() <= me.y() else -8.0
+    x_gain = 12.0
+    if profile.transition_unlock:
+        x_gain = 18.0 if me.x() > 0.0 else 14.0
+        lateral_offset = 5.0 if nearest_opp.pos().y() <= me.y() else -5.0
     target = Vector2D(
-        min(sp.pitch_half_length() - 2.0, me.x() + 12.0),
+        min(sp.pitch_half_length() - 2.0, me.x() + x_gain),
         me.y() + lateral_offset,
     )
     return clamp_to_field(target, margin_x=2.0, margin_y=2.0)
+
+
+def decide_transition_unlock_action(wm: "WorldModel") -> Action | None:
+    me = wm.self().pos()
+    if me.x() < -8.0:
+        return None
+
+    if in_shooting_range(wm):
+        return shoot_action(wm)
+
+    teammate = find_best_pass_target(wm)
+    if teammate is not None and teammate.pos().x() > me.x() + 4.0:
+        return pass_action(wm, teammate, aggressive=True)
+
+    if nearest_valid_opponent_distance(wm, me) < 2.5 and me.x() < 15.0:
+        return None
+
+    return dribble_action(wm, advance=6.0)
+
+
+def defensive_clearance_label(wm: "WorldModel") -> str | None:
+    profile = get_experiment_profile()
+    if not (profile.setplay_shield or profile.box_clear):
+        return None
+
+    sp = ServerParam.i()
+    ball = wm.ball().pos()
+    me = wm.self().pos()
+    opp_pressure = (
+        wm.exist_kickable_opponents()
+        or wm.intercept_table().opponent_reach_cycle() <= 2
+        or nearest_valid_opponent_distance(wm, me) < 4.5
+    )
+    in_our_box = (
+        ball.x() < sp.our_penalty_area_line_x() + 6.0
+        and abs(ball.y()) < sp.penalty_area_half_width() + 5.0
+    )
+    deep_zone = ball.x() < -24.0 or me.x() < -24.0
+    wide_trap = abs(ball.y()) > sp.pitch_half_width() - 10.0 and ball.x() < -18.0
+
+    if profile.box_clear and (in_our_box or (deep_zone and opp_pressure)):
+        return "box_clear"
+    if profile.setplay_shield and deep_zone and (opp_pressure or wide_trap):
+        return "shield_clear"
+    return None
+
+
+def clearance_action(wm: "WorldModel", label: str) -> Action:
+    sp = ServerParam.i()
+    target = choose_clearance_target(wm)
+    return Action(
+        body=Body_SmartKick(target, sp.ball_speed_max(), sp.ball_speed_max() - 0.2, 3),
+        neck=Neck_TurnToBall(),
+        label=label,
+        decision_target=target,
+    )
+
+
+def choose_clearance_target(wm: "WorldModel") -> Vector2D:
+    sp = ServerParam.i()
+    ball = wm.ball().pos()
+    sign = 1.0 if ball.y() >= 0.0 else -1.0
+    target_y = sign * (sp.pitch_half_width() - 4.0)
+    if abs(ball.y()) < 8.0:
+        target_y = sign * 20.0
+
+    target_x = sp.pitch_half_length() - 6.0
+    if ball.x() < -36.0:
+        target_x = max(18.0, sp.pitch_half_length() - 14.0)
+
+    return clamp_to_field(Vector2D(target_x, target_y), margin_x=2.0, margin_y=2.0)
 
 
 def defensive_retreat(unum: int) -> float:

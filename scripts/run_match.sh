@@ -4,6 +4,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPTS_DIR="${PROJECT_ROOT}/scripts"
+source "${SCRIPTS_DIR}/opponents_registry.sh"
 
 START_SCRIPT="${PROJECT_ROOT}/start.sh"
 PARSE_RESULT_SCRIPT="${SCRIPTS_DIR}/parse_result.py"
@@ -22,6 +23,7 @@ MATCH_TIMEOUT="${MATCH_TIMEOUT:-}"
 CONNECT_WAIT="${CONNECT_WAIT:-20}"
 KICK_OFF_WAIT="${KICK_OFF_WAIT:-20}"
 GAME_OVER_WAIT="${GAME_OVER_WAIT:-20}"
+RUN_LABEL="${RUN_LABEL:-${ROBOCUP_EXPERIMENT_PROFILE:-}}"
 
 if [[ -z "${MATCH_TIMEOUT}" ]]; then
   expected_match_sec=$(( HALF_TIME_SECONDS * NR_NORMAL_HALFS ))
@@ -46,6 +48,7 @@ CURRENT_HOME_LAUNCHER_PID=""
 CURRENT_OPPONENT_LAUNCHER_PID=""
 CURRENT_MONITOR_PID=""
 CURRENT_OPPONENT_DIR=""
+CURRENT_OPPONENT_KILL_PATTERNS=""
 
 python_supports_submission_runtime() {
   local candidate="$1"
@@ -77,12 +80,11 @@ resolve_python_bin() {
 RUN_PYTHON_BIN="$(resolve_python_bin)"
 
 usage() {
-  cat <<'EOF' >&2
+  cat <<EOF >&2
 Usage: ./scripts/run_match.sh <opponent_name> [num_matches]
 
 opponent_name:
-  cyrus2d
-  helios
+$(opponent_usage_lines | sed 's/^/  /')
 
 Environment:
   VISUAL=1          enable live monitor (rcssmonitor)
@@ -94,6 +96,15 @@ EOF
 
 log() {
   printf '[run_match] %s\n' "$*"
+}
+
+sanitize_label() {
+  local raw="$1"
+  raw="${raw// /_}"
+  raw="$(printf '%s' "${raw}" | tr -cs '[:alnum:]_-' '_')"
+  raw="${raw##_}"
+  raw="${raw%%_}"
+  printf '%s\n' "${raw}"
 }
 
 die() {
@@ -123,8 +134,18 @@ cleanup_match_processes() {
   fi
 
   if [[ -n "${CURRENT_OPPONENT_DIR}" ]]; then
-    pkill -f "${CURRENT_OPPONENT_DIR}/src/sample_player" 2>/dev/null || true
-    pkill -f "${CURRENT_OPPONENT_DIR}/src/sample_coach" 2>/dev/null || true
+    local pattern
+    if [[ -n "${CURRENT_OPPONENT_KILL_PATTERNS}" ]]; then
+      local opponent_patterns=()
+      IFS='|' read -r -a opponent_patterns <<< "${CURRENT_OPPONENT_KILL_PATTERNS}"
+      for pattern in "${opponent_patterns[@]}"; do
+        [[ -n "${pattern}" ]] || continue
+        pkill -f "${pattern}" 2>/dev/null || true
+      done
+    else
+      pkill -f "${CURRENT_OPPONENT_DIR}/src/sample_player" 2>/dev/null || true
+      pkill -f "${CURRENT_OPPONENT_DIR}/src/sample_coach" 2>/dev/null || true
+    fi
   fi
 
   if [[ -n "${MY_TEAM_NAME}" ]]; then
@@ -136,6 +157,62 @@ cleanup_match_processes() {
   CURRENT_OPPONENT_LAUNCHER_PID=""
   CURRENT_SERVER_PID=""
   CURRENT_MONITOR_PID=""
+}
+
+ensure_opponent_ready() {
+  local opponent_dir="$1"
+  local opponent_target="${opponent_dir}/${OPP_START_REL}"
+
+  case "${OPP_LAUNCH_MODE}" in
+    start_script)
+      if [[ ! -x "${opponent_target}" ]]; then
+        die "opponent start script not found: ${opponent_target}. Run ./scripts/setup_opponents.sh ${OPP_KEY} first."
+      fi
+      ;;
+    wrighteagle_release)
+      if [[ ! -x "${SCRIPTS_DIR}/launch_wrighteagle.sh" ]]; then
+        die "missing WrightEagle launcher: ${SCRIPTS_DIR}/launch_wrighteagle.sh"
+      fi
+      if [[ ! -x "${opponent_target}" ]]; then
+        die "opponent binary not found: ${opponent_target}. Run ./scripts/setup_opponents.sh ${OPP_KEY} first."
+      fi
+      ;;
+    *)
+      die "unsupported launch mode: ${OPP_LAUNCH_MODE}"
+      ;;
+  esac
+}
+
+launch_opponent() {
+  local opponent_dir="$1"
+  local opponent_team_name="$2"
+  local opponent_log="$3"
+  local start_path="${opponent_dir}/${OPP_START_REL}"
+  local extra_args=()
+
+  if [[ -n "${OPP_LAUNCH_EXTRA_ARGS}" ]]; then
+    read -r -a extra_args <<< "${OPP_LAUNCH_EXTRA_ARGS}"
+  fi
+
+  case "${OPP_LAUNCH_MODE}" in
+    start_script)
+      (
+        cd "$(dirname "${start_path}")"
+        ./start.sh -h "${HOST}" -p "${PORT}" -t "${opponent_team_name}" "${extra_args[@]}"
+      ) >"${opponent_log}" 2>&1 &
+      CURRENT_OPPONENT_LAUNCHER_PID="$!"
+      ;;
+    wrighteagle_release)
+      (
+        cd "${opponent_dir}"
+        "${SCRIPTS_DIR}/launch_wrighteagle.sh" -h "${HOST}" -p "${PORT}" -t "${opponent_team_name}"
+      ) >"${opponent_log}" 2>&1 &
+      CURRENT_OPPONENT_LAUNCHER_PID="$!"
+      ;;
+    *)
+      die "unsupported launch mode: ${OPP_LAUNCH_MODE}"
+      ;;
+  esac
 }
 
 resolve_my_team_name() {
@@ -359,34 +436,19 @@ main() {
 
   MY_TEAM_NAME="$(resolve_my_team_name)"
 
-  local opponent_dir
-  local opponent_start
-  local opponent_team_name
+  if ! resolve_opponent "${opponent_name}"; then
+    usage
+    die "unsupported opponent_name: ${opponent_name}"
+  fi
 
-  case "${opponent_name}" in
-    cyrus2d)
-      opponent_dir="${PROJECT_ROOT}/opponents/cyrus2d"
-      opponent_start="${opponent_dir}/src/start.sh"
-      opponent_team_name="${OPPONENT_TEAM_NAME:-Cyrus2D_base}"
-      ;;
-    helios)
-      opponent_dir="${PROJECT_ROOT}/opponents/helios"
-      opponent_start="${opponent_dir}/src/start.sh"
-      opponent_team_name="${OPPONENT_TEAM_NAME:-HELIOS_base}"
-      ;;
-    *)
-      usage
-      die "unsupported opponent_name: ${opponent_name}"
-      ;;
-  esac
+  local opponent_dir="${OPP_DIR}"
+  local opponent_team_name="${OPPONENT_TEAM_NAME:-${OPP_TEAM_NAME}}"
 
   if [[ ! -x "${START_SCRIPT}" ]]; then
     die "our start script is not executable: ${START_SCRIPT}"
   fi
 
-  if [[ ! -x "${opponent_start}" ]]; then
-    die "opponent start script not found: ${opponent_start}. Run ./scripts/setup_opponents.sh first."
-  fi
+  ensure_opponent_ready "${opponent_dir}"
 
   local rcssserver_bin
   rcssserver_bin="$(resolve_rcssserver_bin || true)"
@@ -406,8 +468,17 @@ main() {
 
   local run_ts
   run_ts="$(date +%Y%m%d_%H%M%S)"
-  local result_file="${RESULT_DIR}/${opponent_name}_${run_ts}.txt"
-  local run_log_dir="${MATCH_LOG_ROOT}/${opponent_name}_${run_ts}"
+  local label_suffix=""
+  local run_label_sanitized=""
+  if [[ -n "${RUN_LABEL}" ]]; then
+    run_label_sanitized="$(sanitize_label "${RUN_LABEL}")"
+    if [[ -n "${run_label_sanitized}" ]]; then
+      label_suffix="_${run_label_sanitized}"
+    fi
+  fi
+
+  local result_file="${RESULT_DIR}/${opponent_name}${label_suffix}_${run_ts}.txt"
+  local run_log_dir="${MATCH_LOG_ROOT}/${opponent_name}${label_suffix}_${run_ts}"
   mkdir -p "${run_log_dir}"
 
   local wins=0
@@ -417,6 +488,8 @@ main() {
   cat >"${result_file}" <<EOF
 RoboCup 2D Match Report
 timestamp: ${run_ts}
+run_label: ${run_label_sanitized:-none}
+experiment_profile: ${ROBOCUP_EXPERIMENT_PROFILE:-baseline}
 my_team: ${MY_TEAM_NAME}
 opponent_key: ${opponent_name}
 opponent_team: ${opponent_team_name}
@@ -433,11 +506,14 @@ EOF
   log "match logs: ${run_log_dir}"
 
   CURRENT_OPPONENT_DIR="${opponent_dir}"
+  CURRENT_OPPONENT_KILL_PATTERNS="${OPP_KILL_PATTERNS}"
   trap cleanup_match_processes EXIT INT TERM
 
   local i
   for (( i = 1; i <= num_matches; i++ )); do
     cleanup_match_processes
+    CURRENT_OPPONENT_DIR="${opponent_dir}"
+    CURRENT_OPPONENT_KILL_PATTERNS="${OPP_KILL_PATTERNS}"
 
     local match_dir="${run_log_dir}/match_$(printf '%03d' "${i}")"
     local record_dir="${match_dir}/server_records"
@@ -483,11 +559,7 @@ EOF
     CURRENT_HOME_LAUNCHER_PID="$!"
 
     sleep 1
-    (
-      cd "$(dirname "${opponent_start}")"
-      ./start.sh -h "${HOST}" -p "${PORT}" -t "${opponent_team_name}"
-    ) >"${opponent_log}" 2>&1 &
-    CURRENT_OPPONENT_LAUNCHER_PID="$!"
+    launch_opponent "${opponent_dir}" "${opponent_team_name}" "${opponent_log}"
 
     local wait_status=0
     local score_fields

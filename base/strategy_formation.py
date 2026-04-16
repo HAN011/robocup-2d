@@ -5,6 +5,7 @@ from pathlib import Path
 from lib.formation.delaunay_triangulation import Formation
 from lib.debug.debug import log
 from lib.rcsc.types import GameModeType
+from player.experiment_profile import get_experiment_profile
 from pyrusgeom.vector_2d import Vector2D
 
 
@@ -34,6 +35,7 @@ class _StrategyFormation:
         self._current_key = "normal"
 
     def _select_formation_key(self, wm) -> str:
+        profile = get_experiment_profile()
         gm = wm.game_mode()
         gm_type = gm.type()
 
@@ -66,14 +68,17 @@ class _StrategyFormation:
             key = "setplay_our" if gm.side() == wm.our_side() else "setplay_opp"
         else:
             ball_x = wm.ball().pos().x() if wm.ball().pos_valid() else 0.0
+            ball_y = wm.ball().pos().y() if wm.ball().pos_valid() else 0.0
             self_min = wm.intercept_table().self_reach_cycle()
             teammate_min = wm.intercept_table().teammate_reach_cycle()
             opponent_min = wm.intercept_table().opponent_reach_cycle()
 
             our_reach = min(self_min, teammate_min)
             has_initiative = our_reach <= opponent_min + (1 if ball_x > 0.0 else 0)
+            wide_defense = profile.flank_lock and abs(ball_y) > 18.0 and ball_x < 8.0
+            deep_defense = profile.box_clear and ball_x < -30.0
 
-            if ball_x < -18.0 or not has_initiative:
+            if ball_x < -18.0 or wide_defense or deep_defense or not has_initiative:
                 key = "defense"
             elif ball_x > 10.0 and has_initiative:
                 key = "offense"
