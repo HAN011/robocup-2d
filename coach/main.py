@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -46,8 +47,15 @@ from base.sample_coach import SampleCoach
 from lib.debug.debug import log
 
 
+class MatchRunnerCoach(SampleCoach):
+    def do_substitute(self):
+        if os.environ.get("ROBOCUP_DISABLE_COACH_SUBSTITUTIONS") == "1":
+            return
+        super().do_substitute()
+
+
 def main() -> int:
-    agent = SampleCoach()
+    agent = MatchRunnerCoach()
 
     if not agent.handle_start():
         agent.handle_exit()

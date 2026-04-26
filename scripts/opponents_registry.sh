@@ -15,6 +15,16 @@ starter2d
 EOF
 }
 
+non_helios_opponent_keys() {
+  cat <<'EOF'
+cyrus2d
+wrighteagle
+cyrus_team
+foxsy_cyrus
+starter2d
+EOF
+}
+
 optional_opponent_keys() {
   :
 }
@@ -26,6 +36,26 @@ all_opponent_keys() {
 
 default_setup_opponent_keys() {
   stable_opponent_keys
+}
+
+selected_opponent_keys() {
+  local raw_keys="${BASELINE_OPPONENT_KEYS:-}"
+
+  if [[ -z "${raw_keys}" ]]; then
+    stable_opponent_keys
+    return 0
+  fi
+
+  local normalized="${raw_keys//,/ }"
+  local key
+  for key in ${normalized}; do
+    [[ -n "${key}" ]] || continue
+    if ! resolve_opponent "${key}" >/dev/null 2>&1; then
+      printf '[opponents_registry] ERROR: unknown opponent key: %s\n' "${key}" >&2
+      return 1
+    fi
+    printf '%s\n' "${key}"
+  done
 }
 
 opponent_usage_lines() {
@@ -50,6 +80,8 @@ resolve_opponent() {
   OPP_CMAKE_LIB_VAR=""
   OPP_NEEDS_CPPDNN="0"
   OPP_OPTIONAL="0"
+  OPP_PARALLEL_SERVER_SYNCH_MODE="1"
+  OPP_LAUNCH_OPPONENT_FIRST="0"
 
   case "${key}" in
     cyrus2d)
@@ -74,6 +106,8 @@ resolve_opponent() {
       OPP_TEAM_NAME="HELIOS_base"
       OPP_KILL_PATTERNS="${OPP_DIR}/src/sample_player|${OPP_DIR}/src/sample_coach"
       OPP_LIB_PROFILE="helios_autotools"
+      OPP_PARALLEL_SERVER_SYNCH_MODE="0"
+      OPP_LAUNCH_OPPONENT_FIRST="1"
       ;;
     wrighteagle)
       OPP_KEY="${key}"

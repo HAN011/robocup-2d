@@ -3,12 +3,13 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEAM="${1:-}"
-HOST="${2:-localhost}"
-PORT="${3:-6000}"
+TEAM="${1:-${ROBOCUP_TEAM_NAME:-Aurora}}"
+HOST="${2:-${ROBOCUP_SERVER_HOST:-localhost}}"
+PORT="${3:-${ROBOCUP_SERVER_PORT:-6000}}"
 DEFAULT_LOG_ROOT="${ROBOCUP_LOG_ROOT:-log}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 PLAYER_DELAY="${PLAYER_DELAY:-0.1}"
+DISABLE_FILE_LOG="${DISABLE_FILE_LOG:-0}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S_%N)}"
 
 if [[ "${DEFAULT_LOG_ROOT}" != /* ]]; then
@@ -17,11 +18,6 @@ fi
 
 LOG_DIR="${LOG_DIR:-${DEFAULT_LOG_ROOT}/start/${RUN_ID}}"
 INTERNAL_LOG_ROOT="${LOG_DIR}/runtime"
-
-if [[ -z "${TEAM}" ]]; then
-  echo "Usage: $0 TEAM [HOST] [PORT]" >&2
-  exit 1
-fi
 
 mkdir -p "${LOG_DIR}"
 mkdir -p "${INTERNAL_LOG_ROOT}"
@@ -79,6 +75,13 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+declare -a player_extra_args=()
+declare -a coach_extra_args=()
+if [[ "${DISABLE_FILE_LOG}" == "1" ]]; then
+  player_extra_args+=(--disable-file-log)
+  coach_extra_args+=(--disable-file-log)
+fi
+
 for i in $(seq 1 11); do
   launch "${LOG_DIR}/player_${i}.log" \
     player/main.py \
@@ -86,7 +89,8 @@ for i in $(seq 1 11); do
     --port "${PORT}" \
     --team "${TEAM}" \
     --unum "${i}" \
-    --log-path "${INTERNAL_LOG_ROOT}/player_${i}"
+    --log-path "${INTERNAL_LOG_ROOT}/player_${i}" \
+    "${player_extra_args[@]}"
   sleep "${PLAYER_DELAY}"
 done
 
@@ -95,7 +99,8 @@ launch "${LOG_DIR}/coach.log" \
   --host "${HOST}" \
   --port "${PORT}" \
   --team "${TEAM}" \
-  --log-path "${INTERNAL_LOG_ROOT}/coach"
+  --log-path "${INTERNAL_LOG_ROOT}/coach" \
+  "${coach_extra_args[@]}"
 
 status=0
 for pid in "${pids[@]}"; do

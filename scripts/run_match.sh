@@ -19,11 +19,17 @@ HALF_TIME_CYCLES="${HALF_TIME_CYCLES:-}"
 HALF_TIME_SECONDS="${HALF_TIME_SECONDS:-${HALF_TIME_CYCLES:-300}}"
 NR_NORMAL_HALFS="${NR_NORMAL_HALFS:-2}"
 SIM_STEP_MS="${SIM_STEP_MS:-100}"
+SERVER_SYNCH_MODE="${SERVER_SYNCH_MODE:-0}"
+SERVER_SYNCH_MICRO_SLEEP="${SERVER_SYNCH_MICRO_SLEEP:-0}"
 MATCH_TIMEOUT="${MATCH_TIMEOUT:-}"
 CONNECT_WAIT="${CONNECT_WAIT:-20}"
 KICK_OFF_WAIT="${KICK_OFF_WAIT:-20}"
 GAME_OVER_WAIT="${GAME_OVER_WAIT:-20}"
 RUN_LABEL="${RUN_LABEL:-${ROBOCUP_EXPERIMENT_PROFILE:-}}"
+RUN_MATCH_RESULT_PATH_FILE="${RUN_MATCH_RESULT_PATH_FILE:-}"
+MATCH_DISABLE_INTERNAL_FILE_LOGS="${MATCH_DISABLE_INTERNAL_FILE_LOGS:-0}"
+HOME_OPPONENT_LAUNCH_DELAY="${HOME_OPPONENT_LAUNCH_DELAY:-1}"
+LAUNCH_OPPONENT_FIRST="${LAUNCH_OPPONENT_FIRST:-0}"
 
 if [[ -z "${MATCH_TIMEOUT}" ]]; then
   expected_match_sec=$(( HALF_TIME_SECONDS * NR_NORMAL_HALFS ))
@@ -112,40 +118,86 @@ die() {
   exit 1
 }
 
-cleanup_match_processes() {
-  if [[ -n "${CURRENT_MONITOR_PID}" ]] && kill -0 "${CURRENT_MONITOR_PID}" 2>/dev/null; then
-    kill "${CURRENT_MONITOR_PID}" 2>/dev/null || true
-    wait "${CURRENT_MONITOR_PID}" 2>/dev/null || true
-  fi
+launch_in_session() {
+  local __pid_var="$1"
+  local output_log="$2"
+  shift 2
 
-  if [[ -n "${CURRENT_HOME_LAUNCHER_PID}" ]] && kill -0 "${CURRENT_HOME_LAUNCHER_PID}" 2>/dev/null; then
-    kill "${CURRENT_HOME_LAUNCHER_PID}" 2>/dev/null || true
-    wait "${CURRENT_HOME_LAUNCHER_PID}" 2>/dev/null || true
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" >"${output_log}" 2>&1 &
+  else
+    "$@" >"${output_log}" 2>&1 &
   fi
+  printf -v "${__pid_var}" '%s' "$!"
+}
 
-  if [[ -n "${CURRENT_OPPONENT_LAUNCHER_PID}" ]] && kill -0 "${CURRENT_OPPONENT_LAUNCHER_PID}" 2>/dev/null; then
-    kill "${CURRENT_OPPONENT_LAUNCHER_PID}" 2>/dev/null || true
-    wait "${CURRENT_OPPONENT_LAUNCHER_PID}" 2>/dev/null || true
+launch_in_dir_session() {
+  local __pid_var="$1"
+  local output_log="$2"
+  local work_dir="$3"
+  shift 3
+
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash -c 'cd "$1"; shift; exec "$@"' bash "${work_dir}" "$@" >"${output_log}" 2>&1 &
+  else
+    (
+      cd "${work_dir}"
+      "$@"
+    ) >"${output_log}" 2>&1 &
   fi
+  printf -v "${__pid_var}" '%s' "$!"
+}
 
-  if [[ -n "${CURRENT_SERVER_PID}" ]] && kill -0 "${CURRENT_SERVER_PID}" 2>/dev/null; then
-    kill "${CURRENT_SERVER_PID}" 2>/dev/null || true
-    wait "${CURRENT_SERVER_PID}" 2>/dev/null || true
-  fi
+terminate_process_group() {
+  local pid="$1"
+  local wait_round
+  local signal_target="-${pid}"
 
-  if [[ -n "${CURRENT_OPPONENT_DIR}" ]]; then
-    local pattern
-    if [[ -n "${CURRENT_OPPONENT_KILL_PATTERNS}" ]]; then
-      local opponent_patterns=()
-      IFS='|' read -r -a opponent_patterns <<< "${CURRENT_OPPONENT_KILL_PATTERNS}"
-      for pattern in "${opponent_patterns[@]}"; do
-        [[ -n "${pattern}" ]] || continue
-        pkill -f "${pattern}" 2>/dev/null || true
-      done
-    else
-      pkill -f "${CURRENT_OPPONENT_DIR}/src/sample_player" 2>/dev/null || true
-      pkill -f "${CURRENT_OPPONENT_DIR}/src/sample_coach" 2>/dev/null || true
+  [[ -n "${pid}" ]] || return 0
+
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    if ! kill -TERM -- "${signal_target}" 2>/dev/null; then
+      wait "${pid}" 2>/dev/null || true
+      return 0
     fi
+  else
+    kill -TERM -- "${signal_target}" 2>/dev/null || kill "${pid}" 2>/dev/null || true
+  fi
+
+  for wait_round in 1 2 3 4 5; do
+    if ! kill -0 "${pid}" 2>/dev/null && ! kill -0 -- "${signal_target}" 2>/dev/null; then
+      wait "${pid}" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  kill -9 -- "${signal_target}" 2>/dev/null || kill -9 "${pid}" 2>/dev/null || true
+  wait "${pid}" 2>/dev/null || true
+}
+
+cleanup_match_processes() {
+  if [[ -n "${CURRENT_MONITOR_PID}" ]]; then
+    terminate_process_group "${CURRENT_MONITOR_PID}"
+  fi
+
+  if [[ -n "${CURRENT_HOME_LAUNCHER_PID}" ]]; then
+    terminate_process_group "${CURRENT_HOME_LAUNCHER_PID}"
+  fi
+
+  if [[ -n "${CURRENT_OPPONENT_LAUNCHER_PID}" ]]; then
+    terminate_process_group "${CURRENT_OPPONENT_LAUNCHER_PID}"
+  fi
+
+  if [[ -n "${CURRENT_SERVER_PID}" ]]; then
+    terminate_process_group "${CURRENT_SERVER_PID}"
+  fi
+
+  if [[ -n "${CURRENT_OPPONENT_KILL_PATTERNS}" ]]; then
+    pkill -f "(${CURRENT_OPPONENT_KILL_PATTERNS}).*-h ${HOST}.*-p ${PORT}([[:space:]]|$)" 2>/dev/null || true
+    pkill -f "(${CURRENT_OPPONENT_KILL_PATTERNS}).*-h ${HOST}.*-p $((PORT + 2))([[:space:]]|$)" 2>/dev/null || true
+    pkill -f "(${CURRENT_OPPONENT_KILL_PATTERNS}).*--host ${HOST}.*--port ${PORT}([[:space:]]|$)" 2>/dev/null || true
+    pkill -f "(${CURRENT_OPPONENT_KILL_PATTERNS}).*--host ${HOST}.*--port $((PORT + 2))([[:space:]]|$)" 2>/dev/null || true
   fi
 
   if [[ -n "${MY_TEAM_NAME}" ]]; then
@@ -183,11 +235,78 @@ ensure_opponent_ready() {
   esac
 }
 
+rewrite_config_key() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp_file
+
+  tmp_file="${file}.tmp"
+  if grep -qE "^[[:space:]]*${key}[[:space:]]*:" "${file}"; then
+    awk -v key="${key}" -v value="${value}" '
+      $0 ~ "^[[:space:]]*" key "[[:space:]]*:" { print key " : " value; next }
+      { print }
+    ' "${file}" >"${tmp_file}"
+    mv "${tmp_file}" "${file}"
+  else
+    printf '%s : %s\n' "${key}" "${value}" >>"${file}"
+  fi
+}
+
+rewrite_shell_assignment() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp_file
+
+  tmp_file="${file}.tmp"
+  if grep -qE "^[[:space:]]*${key}=" "${file}"; then
+    awk -v key="${key}" -v value="${value}" '
+      $0 ~ "^[[:space:]]*" key "=" { print key "=" value; next }
+      { print }
+    ' "${file}" >"${tmp_file}"
+    chmod --reference="${file}" "${tmp_file}" 2>/dev/null || true
+    mv "${tmp_file}" "${file}"
+  else
+    printf '%s=%s\n' "${key}" "${value}" >>"${file}"
+  fi
+}
+
+prepare_helios_async_runtime_dir() {
+  local start_path="$1"
+  local opponent_log="$2"
+  local src_dir
+  local runtime_dir
+
+  src_dir="$(dirname "${start_path}")"
+  runtime_dir="$(dirname "${opponent_log}")/opponent_runtime"
+  mkdir -p "${runtime_dir}"
+
+  cp "${src_dir}/start.sh" "${runtime_dir}/start.sh"
+  chmod +x "${runtime_dir}/start.sh"
+  cat >>"${runtime_dir}/start.sh" <<'EOF'
+
+wait
+EOF
+  ln -sfn "${src_dir}/sample_player" "${runtime_dir}/sample_player"
+  ln -sfn "${src_dir}/sample_coach" "${runtime_dir}/sample_coach"
+  ln -sfn "${src_dir}/formations-dt" "${runtime_dir}/formations-dt"
+  cp "${src_dir}/player.conf" "${runtime_dir}/player.conf"
+  cp "${src_dir}/coach.conf" "${runtime_dir}/coach.conf"
+
+  rewrite_config_key "${runtime_dir}/player.conf" "server_wait_seconds" "30"
+  rewrite_config_key "${runtime_dir}/player.conf" "synch_see" "off"
+  rewrite_config_key "${runtime_dir}/coach.conf" "server_wait_seconds" "30"
+
+  printf '%s\n' "${runtime_dir}"
+}
+
 launch_opponent() {
   local opponent_dir="$1"
   local opponent_team_name="$2"
   local opponent_log="$3"
   local start_path="${opponent_dir}/${OPP_START_REL}"
+  local start_dir
   local extra_args=()
 
   if [[ -n "${OPP_LAUNCH_EXTRA_ARGS}" ]]; then
@@ -196,18 +315,24 @@ launch_opponent() {
 
   case "${OPP_LAUNCH_MODE}" in
     start_script)
-      (
-        cd "$(dirname "${start_path}")"
+      start_dir="$(dirname "${start_path}")"
+      if [[ "${OPP_KEY}" == "helios" && "${SERVER_SYNCH_MODE}" == "0" ]]; then
+        start_dir="$(prepare_helios_async_runtime_dir "${start_path}" "${opponent_log}")"
+        extra_args+=("-C")
+      fi
+
+      launch_in_dir_session \
+        CURRENT_OPPONENT_LAUNCHER_PID \
+        "${opponent_log}" \
+        "${start_dir}" \
         ./start.sh -h "${HOST}" -p "${PORT}" -t "${opponent_team_name}" "${extra_args[@]}"
-      ) >"${opponent_log}" 2>&1 &
-      CURRENT_OPPONENT_LAUNCHER_PID="$!"
       ;;
     wrighteagle_release)
-      (
-        cd "${opponent_dir}"
+      launch_in_dir_session \
+        CURRENT_OPPONENT_LAUNCHER_PID \
+        "${opponent_log}" \
+        "${opponent_dir}" \
         "${SCRIPTS_DIR}/launch_wrighteagle.sh" -h "${HOST}" -p "${PORT}" -t "${opponent_team_name}"
-      ) >"${opponent_log}" 2>&1 &
-      CURRENT_OPPONENT_LAUNCHER_PID="$!"
       ;;
     *)
       die "unsupported launch mode: ${OPP_LAUNCH_MODE}"
@@ -282,6 +407,10 @@ parse_server_score() {
   local left_team="${BASH_REMATCH[1]}"
   local right_team="${BASH_REMATCH[2]}"
 
+  if [[ "${left_team}" == "null" || "${right_team}" == "null" ]]; then
+    return 1
+  fi
+
   if [[ ! "${score_line}" =~ Score:[[:space:]]*([0-9]+)[[:space:]]*-[[:space:]]*([0-9]+) ]]; then
     return 1
   fi
@@ -316,11 +445,107 @@ parse_match_score() {
 
   parsed_score="$(parse_rcg_score "${record_dir}" || true)"
   if [[ -n "${parsed_score}" ]]; then
-    printf '%s\n' "${parsed_score}"
-    return 0
+    local left_team right_team left_score right_score
+    IFS=$'\t' read -r left_team right_team left_score right_score <<< "${parsed_score}"
+    if [[ "${left_team}" != "null" && "${right_team}" != "null" ]]; then
+      printf '%s\n' "${parsed_score}"
+      return 0
+    fi
   fi
 
   return 1
+}
+
+sync_or_default() {
+  local sync_value="$1"
+  local normal_value="$2"
+  if [[ "${SERVER_SYNCH_MODE}" == "1" ]]; then
+    printf '%s\n' "${sync_value}"
+  else
+    printf '%s\n' "${normal_value}"
+  fi
+}
+
+collect_match_health() {
+  local match_dir="$1"
+  local server_log="$2"
+  local opponent_log="$3"
+  local home_dir="${match_dir}/home"
+  local disconnect_count=0
+  local timing_count=0
+  local comm_warning_count=0
+  local health_status="ok"
+
+  if [[ -f "${server_log}" ]]; then
+    disconnect_count="$(python - "${server_log}" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+phase = "live"
+count = 0
+for raw in path.open(errors="ignore"):
+    if "Waiting after end of match" in raw:
+        phase = "post"
+    if phase == "live" and ("A player disconnected" in raw or "An online coach disconnected" in raw):
+        count += 1
+print(count)
+PY
+)"
+  fi
+
+  read -r timing_count comm_warning_count < <(
+    python - "${opponent_log}" "${home_dir}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+severe_pat = re.compile(r"skipped server time|missed last action|lost move\?|lost MOVE|lost TURN|lost DASH|lost command TURN_NECK|lost command CHANGE_VIEW")
+comm_pat = re.compile(r"lost command SAY")
+py_cycle_pat = re.compile(r"cycle GameTime cycle ([0-9]+(?:\.[0-9]+)?)")
+cpp_cycle_pat = re.compile(r"\[(-?\d+),\s*(-?\d+)\]")
+
+def warning_cycle(line):
+    match = py_cycle_pat.search(line)
+    if match:
+        return float(match.group(1))
+
+    match = cpp_cycle_pat.search(line)
+    if match:
+        return float(match.group(1))
+
+    return 9999.0
+
+severe = 0
+comm = 0
+for raw_path in sys.argv[1:]:
+    path = Path(raw_path)
+    if path.is_file():
+        files = [path]
+    elif path.is_dir():
+        files = sorted(
+            p for p in path.glob("player_*.log")
+            if p.is_file()
+        )
+    else:
+        files = []
+    for file_path in files:
+        with file_path.open(errors="ignore") as fh:
+            for line in fh:
+                cycle = warning_cycle(line)
+                if severe_pat.search(line) and cycle >= 5.0:
+                    severe += 1
+                if comm_pat.search(line):
+                    comm += 1
+print(severe, comm)
+PY
+  )
+
+  if (( disconnect_count > 0 || timing_count >= 25 )); then
+    health_status="suspect"
+  fi
+
+  printf '%s\t%s\t%s\t%s\n' "${health_status}" "${disconnect_count}" "${timing_count}" "${comm_warning_count}"
 }
 
 finalize_match_result() {
@@ -341,7 +566,7 @@ finalize_match_result() {
     if [[ "${timeout_reason}" == "1" ]]; then
       log "match timeout reached; terminating rcssserver to flush final result"
     fi
-    kill "${pid}" 2>/dev/null || true
+    terminate_process_group "${pid}"
   fi
 
   for wait_sec in 1 2 3 4 5; do
@@ -358,8 +583,7 @@ finalize_match_result() {
   done
 
   if kill -0 "${pid}" 2>/dev/null; then
-    kill -9 "${pid}" 2>/dev/null || true
-    wait "${pid}" >/dev/null 2>&1 || true
+    terminate_process_group "${pid}"
   fi
 
   parsed_score="$(parse_match_score "${server_log}" "${record_dir}" || true)"
@@ -466,8 +690,20 @@ main() {
 
   mkdir -p "${RESULT_DIR}" "${MATCH_LOG_ROOT}"
 
+  local effective_server_delay
+  local effective_connect_wait
+  local effective_kick_off_wait
+  local effective_game_over_wait
+  local effective_home_opponent_launch_delay
+  effective_server_delay="$(sync_or_default 0 "${SERVER_DELAY}")"
+  effective_connect_wait="$(sync_or_default 500 "${CONNECT_WAIT}")"
+  effective_kick_off_wait="$(sync_or_default 500 "${KICK_OFF_WAIT}")"
+  effective_game_over_wait="$(sync_or_default 100 "${GAME_OVER_WAIT}")"
+  effective_home_opponent_launch_delay="$(sync_or_default 0 "${HOME_OPPONENT_LAUNCH_DELAY}")"
+
   local run_ts
   run_ts="$(date +%Y%m%d_%H%M%S)"
+  local run_id="${RUN_ID:-${run_ts}_$$}"
   local label_suffix=""
   local run_label_sanitized=""
   if [[ -n "${RUN_LABEL}" ]]; then
@@ -477,8 +713,8 @@ main() {
     fi
   fi
 
-  local result_file="${RESULT_DIR}/${opponent_name}${label_suffix}_${run_ts}.txt"
-  local run_log_dir="${MATCH_LOG_ROOT}/${opponent_name}${label_suffix}_${run_ts}"
+  local result_file="${RESULT_DIR}/${opponent_name}${label_suffix}_${run_id}.txt"
+  local run_log_dir="${MATCH_LOG_ROOT}/${opponent_name}${label_suffix}_${run_id}"
   mkdir -p "${run_log_dir}"
 
   local wins=0
@@ -488,6 +724,7 @@ main() {
   cat >"${result_file}" <<EOF
 RoboCup 2D Match Report
 timestamp: ${run_ts}
+run_id: ${run_id}
 run_label: ${run_label_sanitized:-none}
 experiment_profile: ${ROBOCUP_EXPERIMENT_PROFILE:-baseline}
 my_team: ${MY_TEAM_NAME}
@@ -504,6 +741,7 @@ EOF
   log "opponent: ${opponent_team_name} (${opponent_name})"
   log "match timeout: ${MATCH_TIMEOUT}s"
   log "match logs: ${run_log_dir}"
+  log "server synch mode: ${SERVER_SYNCH_MODE}"
 
   CURRENT_OPPONENT_DIR="${opponent_dir}"
   CURRENT_OPPONENT_KILL_PATTERNS="${OPP_KILL_PATTERNS}"
@@ -526,40 +764,71 @@ EOF
 
     log "starting match ${i}/${num_matches}"
 
-    "${rcssserver_bin}" \
-      "server::port=${PORT}" \
-      "server::coach_port=$((PORT + 1))" \
-      "server::olcoach_port=$((PORT + 2))" \
-      "server::auto_mode=true" \
-      "server::synch_mode=0" \
-      "server::half_time=${HALF_TIME_SECONDS}" \
-      "server::nr_normal_halfs=${NR_NORMAL_HALFS}" \
-      "server::connect_wait=${CONNECT_WAIT}" \
-      "server::kick_off_wait=${KICK_OFF_WAIT}" \
-      "server::game_over_wait=${GAME_OVER_WAIT}" \
-      "server::game_log_dir=${record_dir}" \
-      "server::text_log_dir=${record_dir}" \
-      "server::keepaway_log_dir=${record_dir}" \
-      >"${server_log}" 2>&1 &
-    CURRENT_SERVER_PID="$!"
+    local server_args=(
+      "server::port=${PORT}"
+      "server::coach_port=$((PORT + 1))"
+      "server::olcoach_port=$((PORT + 2))"
+      "server::auto_mode=true"
+      "server::synch_mode=${SERVER_SYNCH_MODE}"
+      "server::synch_micro_sleep=${SERVER_SYNCH_MICRO_SLEEP}"
+      "server::half_time=${HALF_TIME_SECONDS}"
+      "server::nr_normal_halfs=${NR_NORMAL_HALFS}"
+      "server::connect_wait=${effective_connect_wait}"
+      "server::kick_off_wait=${effective_kick_off_wait}"
+      "server::game_over_wait=${effective_game_over_wait}"
+      "server::game_log_dir=${record_dir}"
+      "server::text_log_dir=${record_dir}"
+      "server::keepaway_log_dir=${record_dir}"
+    )
+    if [[ "${OPP_KEY}" == "helios" && "${SERVER_SYNCH_MODE}" == "0" ]]; then
+      server_args+=("player::allow_mult_default_type=true")
+    fi
 
-    sleep "${SERVER_DELAY}"
+    launch_in_session \
+      CURRENT_SERVER_PID \
+      "${server_log}" \
+      "${rcssserver_bin}" \
+      "${server_args[@]}"
+
+    sleep "${effective_server_delay}"
 
     if [[ "${VISUAL}" == "1" ]]; then
-      "${rcssmonitor_bin}" \
+      launch_in_session \
+        CURRENT_MONITOR_PID \
+        "${monitor_log}" \
+        "${rcssmonitor_bin}" \
         --connect \
         --server-host "${HOST}" \
-        --server-port "${PORT}" \
-        >"${monitor_log}" 2>&1 &
-      CURRENT_MONITOR_PID="$!"
+        --server-port "${PORT}"
       sleep "${MONITOR_DELAY}"
     fi
 
-    LOG_DIR="${match_dir}/home" "${START_SCRIPT}" "${MY_TEAM_NAME}" "${HOST}" "${PORT}" >"${home_log}" 2>&1 &
-    CURRENT_HOME_LAUNCHER_PID="$!"
+  local home_env=(
+    LOG_DIR="${match_dir}/home"
+    DISABLE_FILE_LOG="${MATCH_DISABLE_INTERNAL_FILE_LOGS}"
+    PLAYER_DELAY="$(sync_or_default 0.03 "${PLAYER_DELAY:-0.1}")"
+  )
+  if [[ "${OPP_KEY}" == "helios" && "${SERVER_SYNCH_MODE}" == "0" ]]; then
+    home_env+=(ROBOCUP_DISABLE_COACH_SUBSTITUTIONS=1)
+  fi
 
-    sleep 1
-    launch_opponent "${opponent_dir}" "${opponent_team_name}" "${opponent_log}"
+  if [[ "${LAUNCH_OPPONENT_FIRST}" == "1" ]]; then
+      launch_opponent "${opponent_dir}" "${opponent_team_name}" "${opponent_log}"
+      sleep "${effective_home_opponent_launch_delay}"
+
+      launch_in_session \
+        CURRENT_HOME_LAUNCHER_PID \
+        "${home_log}" \
+        env "${home_env[@]}" "${START_SCRIPT}" "${MY_TEAM_NAME}" "${HOST}" "${PORT}"
+    else
+      launch_in_session \
+        CURRENT_HOME_LAUNCHER_PID \
+        "${home_log}" \
+        env "${home_env[@]}" "${START_SCRIPT}" "${MY_TEAM_NAME}" "${HOST}" "${PORT}"
+
+      sleep "${effective_home_opponent_launch_delay}"
+      launch_opponent "${opponent_dir}" "${opponent_team_name}" "${opponent_log}"
+    fi
 
     local wait_status=0
     local score_fields
@@ -622,6 +891,13 @@ EOF
       echo "  rcg: ${rcg_result}" >>"${result_file}"
     fi
     echo "  logs: ${match_dir}" >>"${result_file}"
+    local health_fields health_status disconnect_count timing_count comm_warning_count
+    health_fields="$(collect_match_health "${match_dir}" "${server_log}" "${opponent_log}")"
+    IFS=$'\t' read -r health_status disconnect_count timing_count comm_warning_count <<< "${health_fields}"
+    echo "  health: ${health_status}" >>"${result_file}"
+    echo "  disconnects: ${disconnect_count}" >>"${result_file}"
+    echo "  timing_warnings: ${timing_count}" >>"${result_file}"
+    echo "  comm_warnings: ${comm_warning_count}" >>"${result_file}"
   done
 
   cat >>"${result_file}" <<EOF
@@ -632,6 +908,10 @@ EOF
 
   log "summary W-D-L: ${wins}-${draws}-${losses}"
   log "result file: ${result_file}"
+  if [[ -n "${RUN_MATCH_RESULT_PATH_FILE}" ]]; then
+    mkdir -p "$(dirname "${RUN_MATCH_RESULT_PATH_FILE}")"
+    printf '%s\n' "${result_file}" >"${RUN_MATCH_RESULT_PATH_FILE}"
+  fi
 }
 
 main "$@"
