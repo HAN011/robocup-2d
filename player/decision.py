@@ -172,6 +172,9 @@ class Body_BhvSetPlay(BodyAction):
 
 class Body_GoalieDecision(BodyAction):
     def execute(self, agent: "PlayerAgent"):
+        if try_safe_goalie_restart(agent):
+            return True
+
         from base import goalie_decision
 
         try:
@@ -414,16 +417,27 @@ def decide_experiment_on_ball_action(wm: "WorldModel") -> Action | None:
 def decide_off_ball_action(wm: "WorldModel") -> Action:
     profile = get_experiment_profile()
     sp = ServerParam.i()
+    unum = wm.self().unum()
     self_min = wm.intercept_table().self_reach_cycle()
     mate_min = wm.intercept_table().teammate_reach_cycle()
     opp_min = wm.intercept_table().opponent_reach_cycle()
-    ball_near_sideline = abs(wm.ball().pos().y()) > sp.pitch_half_width() - 8.0
-    flank_lock_alert = profile.flank_lock and wm.ball().pos().x() < 8.0 and abs(wm.ball().pos().y()) > 18.0
+    ball = wm.ball().pos()
+    ball_near_sideline = abs(ball.y()) > sp.pitch_half_width() - 8.0
+    flank_lock_alert = profile.flank_lock and ball.x() < 8.0 and abs(ball.y()) > 18.0
+    disciplined_screen = disciplined_screen_active(profile, ball, self_min, mate_min, opp_min)
     urgent_defense = (
-        wm.ball().pos().x() < -12.0
+        ball.x() < -12.0
         and self_min <= mate_min + 1
         and self_min <= opp_min + 2
     )
+
+    if (
+        disciplined_screen
+        and unum in (2, 3, 4, 5, 6, 7, 8)
+        and wm.self().pos().x() < 8.0
+        and self_min > min(mate_min, opp_min)
+    ):
+        return decide_off_ball_formation_only(wm)
 
     if (
         not wm.exist_kickable_teammates()
@@ -480,6 +494,7 @@ def _should_tackle(wm: "WorldModel") -> bool:
     from lib.rcsc.types import Card
 
     sp = ServerParam.i()
+    profile = get_experiment_profile()
     tackle_prob = wm.self().tackle_probability()
 
     if (
@@ -499,6 +514,7 @@ def _should_tackle(wm: "WorldModel") -> bool:
     mate_min = wm.intercept_table().teammate_reach_cycle()
     opp_min = wm.intercept_table().opponent_reach_cycle()
     self_reach_point = wm.ball().inertia_point(self_min)
+    screen_active = setplay_screen_active(profile, wm.ball().pos(), self_min, mate_min, opp_min)
 
     self_goal = False
     if self_reach_point.x() < -sp.pitch_half_length():
@@ -507,6 +523,17 @@ def _should_tackle(wm: "WorldModel") -> bool:
         intersect = ball_ray.intersection(goal_line)
         if intersect and intersect.is_valid() and intersect.abs_y() < sp.goal_half_width() + 1.0:
             self_goal = True
+
+    if not self_goal and (profile.setplay_shield or profile.box_clear):
+        in_our_box = (
+            wm.ball().pos().x() < sp.our_penalty_area_line_x() + 8.0
+            and abs(wm.ball().pos().y()) < sp.penalty_area_half_width() + 6.0
+        )
+        deep_defense = wm.ball().pos().x() < -18.0 or wm.self().pos().x() < -20.0
+        if in_our_box or deep_defense:
+            return False
+    if not self_goal and screen_active and wm.self().pos().x() < -10.0:
+        return False
 
     return bool(
         wm.kickable_opponent()
@@ -546,7 +573,7 @@ def pass_action(wm: "WorldModel", teammate: "PlayerObject", aggressive: bool = F
 def dribble_action(wm: "WorldModel", advance: float | None = None) -> Action:
     goal_target = choose_dribble_target(wm)
     if advance is None:
-        advance = 6.0 if get_experiment_profile().transition_unlock and wm.self().pos().x() > -5.0 else 4.0
+        advance = 6.0 if transition_attack_enabled(wm) and wm.self().pos().x() > -5.0 else 4.0
     return Action(
         body=Body_Dribble(goal_target, advance=advance),
         neck=Neck_TurnToBall(),
@@ -556,19 +583,20 @@ def dribble_action(wm: "WorldModel", advance: float | None = None) -> Action:
 
 
 def in_shooting_range(wm: "WorldModel") -> bool:
-    profile = get_experiment_profile()
     sp = ServerParam.i()
     goal_center = Vector2D(sp.pitch_half_length(), 0.0)
     goal_vector = goal_center - wm.self().pos()
     goal_distance = goal_vector.r()
     goal_angle = (goal_vector.th() - wm.self().body()).abs()
-    max_distance = 24.0 if profile.transition_unlock else 20.0
-    max_angle = 38.0 if profile.transition_unlock else 30.0
+    attack_unlocked = transition_attack_enabled(wm) or finish_attack_enabled(wm)
+    max_distance = 24.0 if attack_unlocked else 20.0
+    max_angle = 38.0 if attack_unlocked else 30.0
     return goal_distance < max_distance and goal_angle < max_angle
 
 
 def find_best_pass_target(wm: "WorldModel"):
     profile = get_experiment_profile()
+    attack_unlocked = transition_attack_enabled(wm)
     me = wm.self()
     candidates: list[tuple[float, "PlayerObject"]] = []
     under_pressure = (
@@ -587,7 +615,7 @@ def find_best_pass_target(wm: "WorldModel"):
             continue
         if teammate.goalie():
             continue
-        if profile.transition_unlock and me.pos().x() > -5.0 and teammate.pos().x() < me.pos().x() - 2.0:
+        if attack_unlocked and me.pos().x() > -5.0 and teammate.pos().x() < me.pos().x() - 2.0:
             continue
         if teammate.pos().x() < me.pos().x() - 10.0 and not allow_reset_pass:
             continue
@@ -611,7 +639,7 @@ def find_best_pass_target(wm: "WorldModel"):
             + receiver_space
             - abs(teammate.pos().y()) * 0.08
         )
-        if profile.transition_unlock:
+        if attack_unlocked:
             score += max(progress, 0.0) * 1.4
             score += max(teammate.pos().x(), 0.0) * 0.08
             score -= abs(teammate.pos().y()) * 0.03
@@ -634,6 +662,7 @@ def find_best_pass_target(wm: "WorldModel"):
 
 def pass_lane_clear(wm: "WorldModel", teammate: "PlayerObject", lane_margin: float | None = None) -> bool:
     profile = get_experiment_profile()
+    attack_unlocked = transition_attack_enabled(wm)
     start = wm.self().pos()
     end = teammate.pos()
     margin = pass_lane_margin(wm, start, end) if lane_margin is None else lane_margin
@@ -646,7 +675,7 @@ def pass_lane_clear(wm: "WorldModel", teammate: "PlayerObject", lane_margin: flo
         threshold += 0.4
         if end.x() <= start.x():
             threshold += 0.8
-    if profile.transition_unlock and end.x() > start.x():
+    if attack_unlocked and end.x() > start.x():
         threshold -= 0.4
     return margin >= threshold
 
@@ -740,6 +769,63 @@ def flank_lock_block_target(wm: "WorldModel") -> Vector2D:
     )
 
 
+def setplay_screen_active(profile, ball: Vector2D, self_min: int, mate_min: int, opp_min: int) -> bool:
+    if not profile.setplay_shield:
+        return False
+    if ball.x() > -8.0:
+        return False
+    our_min = min(self_min, mate_min)
+    return opp_min <= our_min + 1
+
+
+def setplay_screen_retreat_bonus(unum: int, screen_active: bool, ball_x: float) -> float:
+    if not screen_active:
+        return 0.0
+    if unum in (2, 3, 4, 5):
+        return 1.4 if ball_x < -18.0 else 0.9
+    if unum in (6, 7, 8):
+        return 0.9 if ball_x < -18.0 else 0.6
+    return 0.0
+
+
+def setplay_screen_cover_bias_bonus(unum: int, screen_active: bool) -> float:
+    if not screen_active:
+        return 0.0
+    if unum in (2, 3, 4, 5):
+        return 0.08
+    if unum in (6, 7, 8):
+        return 0.05
+    return 0.0
+
+
+def disciplined_screen_active(profile, ball: Vector2D, self_min: int, mate_min: int, opp_min: int) -> bool:
+    if not (profile.setplay_shield and profile.box_clear and profile.flank_lock):
+        return False
+    if ball.x() > 2.0:
+        return False
+    return opp_min <= min(self_min, mate_min) + 2
+
+
+def disciplined_screen_retreat_bonus(unum: int, screen_active: bool, ball_x: float) -> float:
+    if not screen_active:
+        return 0.0
+    if unum in (2, 3, 4, 5):
+        return 1.8 if ball_x < -8.0 else 1.2
+    if unum in (6, 7, 8):
+        return 1.1 if ball_x < -8.0 else 0.7
+    return 0.0
+
+
+def disciplined_screen_cover_bias_bonus(unum: int, screen_active: bool) -> float:
+    if not screen_active:
+        return 0.0
+    if unum in (2, 3, 4, 5):
+        return 0.10
+    if unum in (6, 7, 8):
+        return 0.07
+    return 0.0
+
+
 def shifted_formation_position(wm: "WorldModel") -> Vector2D:
     profile = get_experiment_profile()
     StrategyFormation.i().update(wm)
@@ -749,6 +835,8 @@ def shifted_formation_position(wm: "WorldModel") -> Vector2D:
     self_min = wm.intercept_table().self_reach_cycle()
     mate_min = wm.intercept_table().teammate_reach_cycle()
     opp_min = wm.intercept_table().opponent_reach_cycle()
+    screen_active = setplay_screen_active(profile, ball, self_min, mate_min, opp_min)
+    disciplined_screen = disciplined_screen_active(profile, ball, self_min, mate_min, opp_min)
 
     x_shift = clamp(ball.x() * 0.35, -15.0, 15.0)
 
@@ -760,14 +848,26 @@ def shifted_formation_position(wm: "WorldModel") -> Vector2D:
     y_shift = clamp(ball.y() * y_coeff, -12.0, 12.0)
 
     target = Vector2D(base.x() + x_shift, base.y() + y_shift)
-    if opp_min + 1 < min(self_min, mate_min) or ball.x() < -18.0:
+    if opp_min + 1 < min(self_min, mate_min) or ball.x() < -18.0 or screen_active:
         retreat = defensive_retreat(unum)
+        retreat += setplay_screen_retreat_bonus(unum, screen_active, ball.x())
+        retreat += disciplined_screen_retreat_bonus(unum, disciplined_screen, ball.x())
         if profile.box_clear and ball.x() < -36.0 and unum in (2, 3, 4, 5, 6, 7, 8):
             retreat += 1.5 if unum in (2, 3, 4, 5) else 1.0
+        if profile.box_hold and ball.x() < -32.0 and unum in (2, 3, 4, 5, 6, 7, 8):
+            retreat += 0.8 if unum in (2, 3, 4, 5) else 0.5
+        if profile.box_hold_light and ball.x() < -34.0 and unum in (2, 3, 4, 5, 6, 7, 8):
+            retreat += 0.4 if unum in (2, 3, 4, 5) else 0.25
         if profile.flank_lock and ball.x() < 8.0 and abs(ball.y()) > 18.0 and unum in (2, 3, 4, 5, 6, 7, 8):
             retreat += 1.5 if unum in (2, 3, 4, 5) else 1.0
         target._x -= retreat
         cover_bias = 0.45 if unum in (2, 3, 4, 5) else 0.30 if unum in (6, 7, 8) else 0.15
+        cover_bias += setplay_screen_cover_bias_bonus(unum, screen_active)
+        cover_bias += disciplined_screen_cover_bias_bonus(unum, disciplined_screen)
+        if profile.box_hold and ball.x() < -28.0 and unum in (2, 3, 4, 5, 6, 7, 8):
+            cover_bias += 0.05
+        if profile.box_hold_light and ball.x() < -30.0 and unum in (2, 3, 4, 5, 6, 7, 8):
+            cover_bias += 0.03
         if profile.flank_lock and abs(ball.y()) > 18.0:
             cover_bias += 0.20 if unum in (2, 3, 4, 5) else 0.15 if unum in (6, 7, 8) else 0.05
         target._y += clamp((ball.y() - target.y()) * cover_bias, -6.0, 6.0)
@@ -780,6 +880,7 @@ def shifted_formation_position(wm: "WorldModel") -> Vector2D:
 
 def choose_dribble_target(wm: "WorldModel") -> Vector2D:
     profile = get_experiment_profile()
+    attack_unlocked = transition_attack_enabled(wm)
     sp = ServerParam.i()
     me = wm.self().pos()
     nearest_dist = float("inf")
@@ -794,7 +895,7 @@ def choose_dribble_target(wm: "WorldModel") -> Vector2D:
             nearest_opp = opponent
 
     if nearest_opp is None or nearest_dist > 6.0:
-        target_y = clamp(me.y() * (0.35 if profile.transition_unlock else 0.20), -10.0, 10.0)
+        target_y = clamp(me.y() * (0.35 if attack_unlocked else 0.20), -10.0, 10.0)
         target = Vector2D(sp.pitch_half_length(), target_y)
         return clamp_to_field(target, margin_x=2.0, margin_y=2.0)
 
@@ -805,7 +906,7 @@ def choose_dribble_target(wm: "WorldModel") -> Vector2D:
 
     lateral_offset = 8.0 if nearest_opp.pos().y() <= me.y() else -8.0
     x_gain = 12.0
-    if profile.transition_unlock:
+    if attack_unlocked:
         x_gain = 18.0 if me.x() > 0.0 else 14.0
         lateral_offset = 5.0 if nearest_opp.pos().y() <= me.y() else -5.0
     target = Vector2D(
@@ -816,28 +917,193 @@ def choose_dribble_target(wm: "WorldModel") -> Vector2D:
 
 
 def decide_transition_unlock_action(wm: "WorldModel") -> Action | None:
-    me = wm.self().pos()
-    if me.x() < -8.0:
+    profile = get_experiment_profile()
+    if not transition_attack_enabled(wm):
         return None
+
+    me = wm.self().pos()
 
     if in_shooting_range(wm):
         return shoot_action(wm)
 
     teammate = find_best_pass_target(wm)
-    if teammate is not None and teammate.pos().x() > me.x() + 4.0:
+    progress_margin = 6.0 if profile.guarded_transition else 4.0
+    if teammate is not None and teammate.pos().x() > me.x() + progress_margin:
         return pass_action(wm, teammate, aggressive=True)
 
-    if nearest_valid_opponent_distance(wm, me) < 2.5 and me.x() < 15.0:
+    pressure_limit = 4.0 if profile.guarded_transition else 2.5
+    transition_line = 20.0 if profile.guarded_transition else 15.0
+    if nearest_valid_opponent_distance(wm, me) < pressure_limit and me.x() < transition_line:
         return None
 
-    return dribble_action(wm, advance=6.0)
+    advance = 5.5 if profile.guarded_transition else 6.0
+    return dribble_action(wm, advance=advance)
+
+
+def in_our_penalty_support_zone(ball: Vector2D, sp: "ServerParam", x_pad: float = 0.0, y_pad: float = 0.0) -> bool:
+    return (
+        ball.x() < sp.our_penalty_area_line_x() + x_pad
+        and abs(ball.y()) < sp.penalty_area_half_width() + y_pad
+    )
+
+
+def choose_defensive_clearance_label(
+    profile,
+    ball: Vector2D,
+    me: Vector2D,
+    opp_pressure: bool,
+    sp: "ServerParam",
+) -> str | None:
+    if not (profile.setplay_shield or profile.box_clear):
+        return None
+
+    in_our_box = in_our_penalty_support_zone(ball, sp, x_pad=6.0, y_pad=5.0)
+    goalie_risk_box = in_our_penalty_support_zone(ball, sp, x_pad=3.5, y_pad=2.5)
+    deep_zone = ball.x() < -24.0 or me.x() < -24.0
+    wide_trap = abs(ball.y()) > sp.pitch_half_width() - 10.0 and ball.x() < -18.0
+
+    if profile.box_clear and (in_our_box or (deep_zone and opp_pressure)):
+        return "box_clear"
+    if profile.setplay_shield and (goalie_risk_box or (deep_zone and (opp_pressure or wide_trap))):
+        return "shield_clear"
+    return None
+
+
+def should_use_one_step_clear(ball: Vector2D, me: Vector2D, opp_pressure: bool, sp: "ServerParam") -> bool:
+    return in_our_penalty_support_zone(ball, sp, x_pad=3.5, y_pad=2.5) or (ball.x() < -24.0 and opp_pressure)
+
+
+def should_use_safe_goalie_restart(wm: "WorldModel") -> bool:
+    profile = get_experiment_profile()
+    if not profile.setplay_shield or not wm.self().goalie():
+        return False
+
+    gm = wm.game_mode()
+    if gm.side() != wm.our_side():
+        return False
+
+    gm_type = gm.type()
+    return gm_type.is_goal_kick() or gm_type.is_goalie_catch_ball()
+
+
+def goalie_restart_crowding_score(wm: "WorldModel", target: Vector2D) -> float:
+    score = 0.0
+    for opponent in wm.opponents():
+        if opponent is None or opponent.unum() <= 0 or opponent.pos_count() > 8 or opponent.is_ghost():
+            continue
+        score += 1.0 / max(opponent.pos().dist2(target), 1.0)
+    return score
+
+
+def choose_goalie_restart_target(wm: "WorldModel") -> Vector2D:
+    sp = ServerParam.i()
+    wing_y = sp.pitch_half_width() - 6.0
+    candidates = [
+        Vector2D(18.0, wing_y),
+        Vector2D(18.0, -wing_y),
+        Vector2D(28.0, 22.0),
+        Vector2D(28.0, -22.0),
+    ]
+
+    ball = wm.ball().pos()
+    preferred_sign = 1.0 if ball.y() >= 0.0 else -1.0
+
+    best_target = candidates[0]
+    best_score = float("inf")
+    for candidate in candidates:
+        score = goalie_restart_crowding_score(wm, candidate)
+        if candidate.y() * preferred_sign > 0.0:
+            score -= 0.01
+        if abs(candidate.y()) > 25.0:
+            score -= 0.01
+        if score < best_score:
+            best_score = score
+            best_target = candidate
+
+    return clamp_to_field(best_target, margin_x=2.0, margin_y=2.0)
+
+
+def try_safe_goalie_restart(agent: "PlayerAgent") -> bool:
+    wm = agent.world()
+    if not should_use_safe_goalie_restart(wm):
+        return False
+
+    gm_type = wm.game_mode().type()
+    if gm_type.is_goalie_catch_ball():
+        catch_time = agent.effector().catch_time()
+        if wm.time().cycle() - catch_time.cycle() <= 2:
+            agent.set_neck_action(NeckTurnToBallOrScan())
+            return True
+
+    if not wm.self().is_kickable():
+        return False
+
+    target = choose_goalie_restart_target(wm)
+    Body_KickOneStep(target, ServerParam.i().ball_speed_max()).execute(agent)
+    agent.set_neck_action(NeckTurnToBallOrScan())
+    return True
+
+
+def transition_attack_enabled(wm: "WorldModel") -> bool:
+    profile = get_experiment_profile()
+    if not profile.transition_unlock:
+        return False
+    if not profile.guarded_transition:
+        return True
+
+    me = wm.self().pos()
+    ball = wm.ball().pos()
+    self_min = wm.intercept_table().self_reach_cycle()
+    mate_min = wm.intercept_table().teammate_reach_cycle()
+    opp_min = wm.intercept_table().opponent_reach_cycle()
+    nearest_opp = nearest_valid_opponent_distance(wm, me)
+    under_pressure = (
+        wm.exist_kickable_opponents()
+        or opp_min <= 2
+        or nearest_opp < 3.8
+    )
+
+    if me.x() < 6.0 or ball.x() < 0.0:
+        return False
+    if min(self_min, mate_min) > opp_min + 1:
+        return False
+    if under_pressure and me.x() < 18.0:
+        return False
+    if abs(ball.y()) > 24.0 and me.x() < 18.0:
+        return False
+
+    return True
+
+
+def finish_attack_enabled(wm: "WorldModel") -> bool:
+    profile = get_experiment_profile()
+    if not profile.finish_unlock:
+        return False
+
+    me = wm.self().pos()
+    ball = wm.ball().pos()
+    min_me_x = 26.0 if profile.finish_tight else 22.0
+    min_ball_x = 19.0 if profile.finish_tight else 15.0
+    max_abs_y = 15.0 if profile.finish_tight else 18.0
+    min_opp_dist = 6.5 if profile.finish_tight else 5.5
+
+    if me.x() < min_me_x or ball.x() < min_ball_x:
+        return False
+    if abs(me.y()) > max_abs_y:
+        return False
+    if wm.exist_kickable_opponents():
+        return False
+    if nearest_valid_opponent_distance(wm, me) < min_opp_dist:
+        return False
+
+    our_min = min(wm.intercept_table().self_reach_cycle(), wm.intercept_table().teammate_reach_cycle())
+    opp_min = wm.intercept_table().opponent_reach_cycle()
+    control_margin = 0 if profile.finish_tight else 1
+    return our_min <= opp_min + control_margin
 
 
 def defensive_clearance_label(wm: "WorldModel") -> str | None:
     profile = get_experiment_profile()
-    if not (profile.setplay_shield or profile.box_clear):
-        return None
-
     sp = ServerParam.i()
     ball = wm.ball().pos()
     me = wm.self().pos()
@@ -846,25 +1112,25 @@ def defensive_clearance_label(wm: "WorldModel") -> str | None:
         or wm.intercept_table().opponent_reach_cycle() <= 2
         or nearest_valid_opponent_distance(wm, me) < 4.5
     )
-    in_our_box = (
-        ball.x() < sp.our_penalty_area_line_x() + 6.0
-        and abs(ball.y()) < sp.penalty_area_half_width() + 5.0
-    )
-    deep_zone = ball.x() < -24.0 or me.x() < -24.0
-    wide_trap = abs(ball.y()) > sp.pitch_half_width() - 10.0 and ball.x() < -18.0
-
-    if profile.box_clear and (in_our_box or (deep_zone and opp_pressure)):
-        return "box_clear"
-    if profile.setplay_shield and deep_zone and (opp_pressure or wide_trap):
-        return "shield_clear"
-    return None
+    return choose_defensive_clearance_label(profile, ball, me, opp_pressure, sp)
 
 
 def clearance_action(wm: "WorldModel", label: str) -> Action:
     sp = ServerParam.i()
     target = choose_clearance_target(wm)
+    opp_pressure = (
+        wm.exist_kickable_opponents()
+        or wm.intercept_table().opponent_reach_cycle() <= 2
+        or nearest_valid_opponent_distance(wm, wm.self().pos()) < 4.5
+    )
+    one_step_clear = should_use_one_step_clear(wm.ball().pos(), wm.self().pos(), opp_pressure, sp)
+    body = (
+        Body_KickOneStep(target, sp.ball_speed_max())
+        if one_step_clear
+        else Body_SmartKick(target, sp.ball_speed_max(), sp.ball_speed_max() - 0.2, 3)
+    )
     return Action(
-        body=Body_SmartKick(target, sp.ball_speed_max(), sp.ball_speed_max() - 0.2, 3),
+        body=body,
         neck=Neck_TurnToBall(),
         label=label,
         decision_target=target,

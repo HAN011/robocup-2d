@@ -76,9 +76,15 @@ class _StrategyFormation:
             our_reach = min(self_min, teammate_min)
             has_initiative = our_reach <= opponent_min + (1 if ball_x > 0.0 else 0)
             wide_defense = profile.flank_lock and abs(ball_y) > 18.0 and ball_x < 8.0
-            deep_defense = profile.box_clear and ball_x < -30.0
+            hybrid_low_block = profile.setplay_shield and profile.box_clear and profile.flank_lock and ball_x < 12.0
+            deep_defense_line = -30.0
+            if profile.box_hold:
+                deep_defense_line = -28.0
+            elif profile.box_hold_light:
+                deep_defense_line = -29.0
+            deep_defense = profile.box_clear and ball_x < deep_defense_line
 
-            if ball_x < -18.0 or wide_defense or deep_defense or not has_initiative:
+            if hybrid_low_block or ball_x < -18.0 or wide_defense or deep_defense or not has_initiative:
                 key = "defense"
             elif ball_x > 10.0 and has_initiative:
                 key = "offense"
