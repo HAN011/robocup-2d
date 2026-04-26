@@ -470,10 +470,13 @@ collect_match_health() {
   local match_dir="$1"
   local server_log="$2"
   local opponent_log="$3"
+  local opponent_team_name="$4"
   local home_dir="${match_dir}/home"
+  local record_dir="${match_dir}/server_records"
   local disconnect_count=0
   local timing_count=0
   local comm_warning_count=0
+  local opponent_action_count=0
   local health_status="ok"
 
   if [[ -f "${server_log}" ]]; then
@@ -541,11 +544,30 @@ print(severe, comm)
 PY
   )
 
-  if (( disconnect_count > 0 || timing_count >= 25 )); then
+
+  opponent_action_count="$(python - "${record_dir}" "${opponent_team_name}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+record_dir = Path(sys.argv[1])
+opponent_team = sys.argv[2]
+action_re = re.compile(r"\((dash|turn|kick|move|catch|tackle|change_view|turn_neck|pointto|attentionto|say|done)(?:\s|\))")
+count = 0
+for rcl_path in sorted(record_dir.glob("*.rcl")):
+    with rcl_path.open(errors="ignore") as fh:
+        for line in fh:
+            if f"Recv {opponent_team}_" in line and action_re.search(line):
+                count += 1
+print(count)
+PY
+  )"
+
+  if (( disconnect_count > 0 || opponent_action_count == 0 )); then
     health_status="suspect"
   fi
 
-  printf '%s\t%s\t%s\t%s\n' "${health_status}" "${disconnect_count}" "${timing_count}" "${comm_warning_count}"
+  printf '%s\t%s\t%s\t%s\t%s\n' "${health_status}" "${disconnect_count}" "${timing_count}" "${comm_warning_count}" "${opponent_action_count}"
 }
 
 finalize_match_result() {
@@ -891,13 +913,14 @@ EOF
       echo "  rcg: ${rcg_result}" >>"${result_file}"
     fi
     echo "  logs: ${match_dir}" >>"${result_file}"
-    local health_fields health_status disconnect_count timing_count comm_warning_count
-    health_fields="$(collect_match_health "${match_dir}" "${server_log}" "${opponent_log}")"
-    IFS=$'\t' read -r health_status disconnect_count timing_count comm_warning_count <<< "${health_fields}"
+    local health_fields health_status disconnect_count timing_count comm_warning_count opponent_action_count
+    health_fields="$(collect_match_health "${match_dir}" "${server_log}" "${opponent_log}" "${opponent_team_name}")"
+    IFS=$'\t' read -r health_status disconnect_count timing_count comm_warning_count opponent_action_count <<< "${health_fields}"
     echo "  health: ${health_status}" >>"${result_file}"
     echo "  disconnects: ${disconnect_count}" >>"${result_file}"
     echo "  timing_warnings: ${timing_count}" >>"${result_file}"
     echo "  comm_warnings: ${comm_warning_count}" >>"${result_file}"
+    echo "  opponent_actions: ${opponent_action_count}" >>"${result_file}"
   done
 
   cat >>"${result_file}" <<EOF

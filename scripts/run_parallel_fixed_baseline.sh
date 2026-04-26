@@ -222,11 +222,13 @@ for index in "${!opponent_keys[@]}"; do
       suspicious_matches="$(grep -E -c '^  health: suspect$' "${latest_result}" 2>/dev/null || true)"
       total_disconnects="$(sed -n 's/^  disconnects: //p' "${latest_result}" | awk '{ total += $1 } END { print total + 0 }')"
       total_timing_warnings="$(sed -n 's/^  timing_warnings: //p' "${latest_result}" | awk '{ total += $1 } END { print total + 0 }')"
+      total_opponent_actions="$(sed -n 's/^  opponent_actions: //p' "${latest_result}" | awk '{ total += $1 } END { print total + 0 }')"
       suspect_total=$((suspect_total + suspicious_matches))
       printf '  result: %s\n' "${latest_result}"
       printf '  suspicious_matches: %s\n' "${suspicious_matches}"
       printf '  total_disconnects: %s\n' "${total_disconnects}"
       printf '  total_timing_warnings: %s\n' "${total_timing_warnings}"
+      printf '  total_opponent_actions: %s\n' "${total_opponent_actions}"
       sed -n '1,40p' "${latest_result}" | sed 's/^/    /'
     else
       printf '  result: ERROR missing result path\n'
