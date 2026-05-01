@@ -177,6 +177,8 @@ for index in "${!opponent_keys[@]}"; do
   (
     PORT="${port}" \
       RUN_ID="${run_id}_${opponent_key}" \
+    ROBOCUP_OPPONENT_KEY="${opponent_key}" \
+      ROBOCUP_OPPONENT_KEY="${opponent_key}" \
       RUN_PARALLEL_MODE="1" \
       SERVER_SYNCH_MODE="${opponent_sync_mode}" \
       SERVER_SYNCH_MICRO_SLEEP="${PARALLEL_SERVER_SYNCH_MICRO_SLEEP}" \

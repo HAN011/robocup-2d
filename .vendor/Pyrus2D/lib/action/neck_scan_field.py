@@ -35,7 +35,7 @@ class NeckScanField(NeckAction):
         if (NeckScanField._last_calc_time == wm.time()
             and NeckScanField._last_calc_view_width != ef.queued_next_view_width()):
             
-            agent.do_turn_neck(NeckScanField._cached_target_angle - ef.queued_next_self_body() - wm.self().neck())
+            agent.do_turn_neck(AngleDeg(NeckScanField._cached_target_angle) - ef.queued_next_self_body() - wm.self().neck())
             return True
         
         NeckScanField._last_calc_time = wm.time().copy()

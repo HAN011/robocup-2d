@@ -207,7 +207,7 @@ class WorldModel:
             if self._their_players[i].player_type() is None:
                 continue
             self._their_players[i].update_with_world(self)
-            if self._our_players[i].is_kickable():
+            if self._their_players[i].is_kickable():
                 self._last_kicker_side = self._their_players[i].side()
                 self._exist_kickable_opponents = True
 
@@ -1043,7 +1043,7 @@ class WorldModel:
                 self._set_play_count = 0
             
             if game_mode.type().is_goal_kick():
-                self._ball.update_only_vel(Vector2D(0, 0), 0)
+                self._ball.update_only_vel(Vector2D(0, 0), Vector2D(0, 0), 0)
         SP = ServerParam.i()
         if game_mode.type() is GameModeType.BeforeKickOff:
             normal_time = (SP.actual_half_time() * SP.nr_normal_halfs()

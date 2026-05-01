@@ -162,7 +162,7 @@ class GlobalWorldModel:
                 self._set_play_count = 0
             
             if game_mode.type().is_goal_kick():
-                self._ball.update_only_vel(Vector2D(0, 0), 0)
+                self._ball.set_vel(0, 0)
         
         if self._game_mode.type() is not GameModeType.PlayOn and game_mode.type() is GameModeType.PlayOn:
             self._last_playon_start = current_time.cycle()        

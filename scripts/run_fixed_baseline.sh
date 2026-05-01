@@ -61,6 +61,7 @@ while IFS= read -r opponent_key; do
   result_path_file="$(mktemp "${TMPDIR:-/tmp}/run_match_result_${opponent_key}.XXXXXX")"
   PORT="${port}" \
     RUN_ID="${run_id}_${opponent_key}" \
+    ROBOCUP_OPPONENT_KEY="${opponent_key}" \
     RUN_MATCH_RESULT_PATH_FILE="${result_path_file}" \
     "${SCRIPTS_DIR}/run_match.sh" "${opponent_key}" "${MATCHES_PER_OPPONENT}"
 

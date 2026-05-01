@@ -160,7 +160,7 @@ class CoachAgent(SoccerAgent):
                     self.parse_message(message.decode())
                     last_time_rec = time.time()
                     break
-                elif time.time() - last_time_rec > 3:
+                elif time.time() - last_time_rec > team_config.SERVER_SILENCE_TIMEOUT:
                     self._client.set_server_alive(False)
                     break
                 if self.think_received:

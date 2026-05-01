@@ -319,7 +319,7 @@ class PlayerAgent(SoccerAgent):
             if len(message) == 0:
                 waited_msec += team_config.SOCKET_INTERVAL
                 timeout_count += 1
-                if time.time() - last_time_rec > 3:
+                if time.time() - last_time_rec > team_config.SERVER_SILENCE_TIMEOUT:
                     self._client.set_server_alive(False)
                     break
             else:
